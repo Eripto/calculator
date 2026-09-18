@@ -49,7 +49,7 @@ LDFLAGS=(
   -Wl,--gc-sections -Wl,--strip-all -Wl,--no-insert-timestamp
 )
 
-LIBS=(-lgdiplus -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -luuid -lmsvcrt)
+LIBS=(-lgdiplus -lmsimg32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -luuid -lmsvcrt)
 
 echo "==> building engine ($ARCH)"
 SOURCES=()
@@ -87,7 +87,7 @@ echo "==> linking"
 
 SIZE=$(stat -c %s "$OUT/Calculator.exe")
 printf '==> %s\n    %s bytes (%s KB)\n' "$OUT/Calculator.exe" "$SIZE" "$((SIZE / 1024))"
-BUDGET_KB="${CALC_SIZE_BUDGET_KB:-350}"
+BUDGET_KB="${CALC_SIZE_BUDGET_KB:-425}"
 if (( SIZE > BUDGET_KB * 1024 )); then
   echo "    ERROR: over the ${BUDGET_KB} KB budget" >&2
   exit 1

@@ -25,6 +25,7 @@ drawing, which is where the size saving comes from.
 | Memory | `MC MR M+ M- MS` strip plus the multi-slot memory list with per-slot commands |
 | History | Panel with newest-first entries; clicking one restores it by replaying its stored commands |
 | Chrome | Navigation pane with both category groups, Always on top, Settings/About, light/dark theme following the system setting, system accent colour, per-monitor DPI v2, dark title bar, keyboard shortcuts |
+| Motion | Sliding navigation pane and settings page, fading flyouts, page-transition on mode change, sliding history/memory panel, and Fluent hover and pointer-down states on every key |
 
 ### Not included, and why
 
@@ -38,6 +39,28 @@ drawing, which is where the size saving comes from.
   upstream rate endpoints are dead and substitutes placeholder data (fictional
   planet currencies). Live rates need Microsoft's own service, so the category
   is omitted rather than shipped with joke data.
+
+## Motion
+
+Timings and curves follow the WinUI motion guidance the shipping app is built
+on: 167ms for a small state change, 250ms for a surface moving onto the screen,
+and a decelerating curve (approximating `cubic-bezier(0, 0, 0, 1)`) for anything
+entering.
+
+| Where | What happens |
+| --- | --- |
+| Navigation pane, Settings | Slides in from the left over a scrim, and back out |
+| Mode change | New content fades in while rising into place |
+| Dropdown flyouts | Fade in and lift |
+| History / memory panel | Slides in from the right when docked, upward when it covers the keypad |
+| Every key | Hover cross-fades between keys; pointer-down shrinks the key slightly and fades the pressed fill in |
+
+Two implementation notes. Animated values are computed from the clock on demand
+rather than stepped, so a dropped frame never leaves an animation stranded
+part-way. And because GDI text has no alpha of its own, the transitions that
+need a true fade (mode change, flyouts) render to an offscreen layer and
+`AlphaBlend` it, rather than faking it with colour interpolation. The frame
+timer only runs while something is moving.
 
 ## Building
 

@@ -304,6 +304,110 @@ namespace
         return MulDiv(dip, g_dpi, 96);
     }
 
+    // ---------------------------------------------------------------- motion
+    //
+    // Durations and curves follow the WinUI motion guidance the shipping app is
+    // built on: 167ms for a small state change, 250ms for a surface moving onto
+    // the screen, and a decelerating curve for anything entering. Values are
+    // computed from the clock on demand rather than stepped, so a dropped frame
+    // never desynchronises an animation from where it should be.
+    constexpr int kMotionFastMs = 167;
+    constexpr int kMotionNormalMs = 250;
+
+    // Approximates the WinUI "decelerate" curve, cubic-bezier(0, 0, 0, 1).
+    inline float EaseDecelerate(float t)
+    {
+        const float inverse = 1.0f - t;
+        return 1.0f - inverse * inverse * inverse * inverse;
+    }
+
+    // Approximates "point to point", cubic-bezier(0.55, 0.55, 0, 1).
+    inline float EaseStandard(float t)
+    {
+        const float inverse = 1.0f - t;
+        return 1.0f - inverse * inverse * inverse;
+    }
+
+    class Anim
+    {
+    public:
+        // Retargets from wherever the value currently is, so an interrupted
+        // animation continues smoothly instead of jumping.
+        void To(float target, int durationMs, float (*easing)(float) = EaseDecelerate)
+        {
+            if (m_target == target && (m_startTick != 0 || m_value == target))
+            {
+                return;
+            }
+            m_value = Value();
+            m_from = m_value;
+            m_target = target;
+            m_duration = (durationMs > 0) ? durationMs : 1;
+            m_easing = easing;
+            m_startTick = GetTickCount64();
+        }
+
+        void Set(float value)
+        {
+            m_value = value;
+            m_from = value;
+            m_target = value;
+            m_startTick = 0;
+        }
+
+        float Value() const
+        {
+            if (m_startTick == 0)
+            {
+                return m_target;
+            }
+            const ULONGLONG elapsed = GetTickCount64() - m_startTick;
+            if (elapsed >= static_cast<ULONGLONG>(m_duration))
+            {
+                return m_target;
+            }
+            const float t = static_cast<float>(elapsed) / static_cast<float>(m_duration);
+            return m_from + (m_target - m_from) * m_easing(t);
+        }
+
+        bool Active() const
+        {
+            return m_startTick != 0 && (GetTickCount64() - m_startTick) < static_cast<ULONGLONG>(m_duration);
+        }
+
+        void Settle()
+        {
+            if (m_startTick != 0 && !Active())
+            {
+                m_value = m_target;
+                m_startTick = 0;
+            }
+        }
+
+    private:
+        ULONGLONG m_startTick = 0;
+        int m_duration = 1;
+        float m_from = 0.0f;
+        float m_target = 0.0f;
+        float m_value = 0.0f;
+        float (*m_easing)(float) = EaseDecelerate;
+    };
+
+    // Blends two colours; used to fade hover and press states in rather than
+    // switching them on a frame boundary.
+    COLORREF Blend(COLORREF from, COLORREF to, float t)
+    {
+        if (t <= 0.0f)
+        {
+            return from;
+        }
+        if (t >= 1.0f)
+        {
+            return to;
+        }
+        return Mix(from, to, static_cast<double>(t));
+    }
+
     // ------------------------------------------------------- engine plumbing
 
     // Serves the engine the same CEngineStrings values the shipping app uses,
@@ -784,6 +888,9 @@ namespace
             m_manager->SetStandardMode();
             m_manager->SendCommand(Command::CommandDEG);
             m_manager->SetMemorizedNumbersString();
+            // The first frame is already "arrived": only a mode change replays
+            // the entrance.
+            m_contentAnim.Set(1.0f);
         }
 
         Mode CurrentMode() const
@@ -796,11 +903,15 @@ namespace
             if (m_mode == mode)
             {
                 m_navOpen = false;
+                m_navAnim.To(0.0f, kMotionNormalMs);
+                EnsureFrameTimer();
                 Relayout();
                 return;
             }
             m_mode = mode;
             m_navOpen = false;
+            m_navAnim.To(0.0f, kMotionNormalMs);
+            StartContentEnter();
             m_menuOpen = false;
             m_second = false;
             m_hyp = false;
@@ -866,7 +977,86 @@ namespace
             m_navOpen = false;
             m_menuOpen = false;
             m_panel = Panel::None;
+            m_navAnim.To(0.0f, kMotionNormalMs);
+            StartContentEnter();
             Relayout();
+        }
+
+        bool NavVisible() const
+        {
+            return m_navOpen || m_navAnim.Value() > 0.002f;
+        }
+
+        bool SettingsVisible() const
+        {
+            return m_settingsOpen || m_settingsAnim.Value() > 0.002f;
+        }
+
+        bool AnimationsRunning() const
+        {
+            return m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active() || m_menuAnim.Active() || m_contentAnim.Active()
+                || m_pressAnim.Active() || m_hoverIn.Active() || m_hoverOut.Active();
+        }
+
+        // The frame timer only runs while something is moving.
+        void EnsureFrameTimer()
+        {
+            if (!m_hwnd)
+            {
+                return;
+            }
+            if (AnimationsRunning())
+            {
+                if (!m_frameTimerOn)
+                {
+                    SetTimer(m_hwnd, 2, 16, nullptr);
+                    m_frameTimerOn = true;
+                }
+            }
+            else if (m_frameTimerOn)
+            {
+                KillTimer(m_hwnd, 2);
+                m_frameTimerOn = false;
+                m_navAnim.Settle();
+                m_settingsAnim.Settle();
+                m_panelAnim.Settle();
+                m_menuAnim.Settle();
+                m_contentAnim.Settle();
+                m_pressAnim.Settle();
+                m_hoverIn.Settle();
+                m_hoverOut.Settle();
+            }
+        }
+
+        // Cross-fades the highlight from the previously hovered key to the new
+        // one, so neither snaps.
+        void SetHover(int action)
+        {
+            if (action == m_hoverInAction)
+            {
+                return;
+            }
+            m_hoverOutAction = m_hoverInAction;
+            m_hoverOut.Set(m_hoverIn.Value());
+            if (m_hoverOutAction != ACT_NONE)
+            {
+                m_hoverOut.To(0.0f, kMotionFastMs, EaseStandard);
+            }
+            m_hoverInAction = action;
+            m_hoverIn.Set(0.0f);
+            if (action != ACT_NONE)
+            {
+                m_hoverIn.To(1.0f, kMotionFastMs, EaseStandard);
+            }
+            EnsureFrameTimer();
+        }
+
+        // Content entering the frame rises slightly as it fades in.
+        void StartContentEnter()
+        {
+            m_contentAnim.Set(0.0f);
+            m_contentAnim.To(1.0f, kMotionNormalMs);
+            EnsureFrameTimer();
         }
 
         void Invalidate()
@@ -995,6 +1185,21 @@ namespace
         bool m_navOpen = false;
         bool m_menuOpen = false;
         std::vector<Btn> m_buttons;
+        // The navigation pane and the settings page are overlay surfaces drawn
+        // above the mode content, which is what lets them slide over it.
+        std::vector<Btn> m_navButtons;
+
+        Anim m_navAnim;      // navigation pane, 0 closed .. 1 open
+        Anim m_settingsAnim; // settings page
+        Anim m_panelAnim;    // history / memory panel
+        Anim m_menuAnim;     // dropdown flyout
+        Anim m_contentAnim;  // mode content entering
+        Anim m_pressAnim;    // pointer-down shrink on the pressed key
+        Anim m_hoverIn;
+        Anim m_hoverOut;
+        int m_hoverInAction = ACT_NONE;
+        int m_hoverOutAction = ACT_NONE;
+        bool m_frameTimerOn = false;
         std::vector<Btn> m_menuButtons;
         std::vector<MenuItem> m_menuItemStorage;
         std::vector<std::wstring> m_menuLabelStorage;
@@ -1017,6 +1222,9 @@ namespace
         int m_navScroll = 0;
         int m_hot = -1;
         int m_pressed = -1;
+        int m_hotNav = -1;
+        int m_pressedNav = -1;
+        int m_navSlide = 0;
         int m_hotMenu = -1;
         int m_historyScroll = 0;
         std::vector<RECT> m_historyRects;
@@ -1041,6 +1249,30 @@ namespace
         void BuildDateLayout(int contentRight, int height, int y);
         void BuildNavLayout(int width, int height);
         void BuildSettingsLayout(int width, int height);
+
+        // The overlay surfaces are independent of which mode is showing, so
+        // every exit path from BuildLayout ends here.
+        void BuildOverlayLayout(int width, int height)
+        {
+            if (NavVisible())
+            {
+                BuildNavLayout(width, height);
+            }
+            else if (SettingsVisible())
+            {
+                BuildSettingsLayout(width, height);
+            }
+        }
+
+        // Adds an overlay row, shifted by the pane's current slide offset.
+        void PushNav(Btn button)
+        {
+            button.rc.left -= m_navSlide;
+            button.rc.right -= m_navSlide;
+            m_navButtons.push_back(std::move(button));
+        }
+
+
 
     public:
         void OpenDateFieldMenu(int fieldIndex);
@@ -1128,16 +1360,7 @@ namespace
         m_historyRects.clear();
         m_memoryRects.clear();
 
-        if (m_navOpen)
-        {
-            BuildNavLayout(width, height);
-            return;
-        }
-        if (m_settingsOpen)
-        {
-            BuildSettingsLayout(width, height);
-            return;
-        }
+        m_navButtons.clear();
 
         const int pad = Dp(kPadDip);
         const int gap = Dp(kGapDip);
@@ -1145,6 +1368,10 @@ namespace
         m_docked = (m_panel != Panel::None) && (width >= Dp(kDockThresholdDip));
         const int contentRight = m_docked ? width - Dp(kPanelWidthDip) : width;
         m_panelRect = m_docked ? RECT{ contentRight, Dp(kNavRowDip), width, height } : RECT{ 0, 0, width, height };
+
+        // The panel slides in: from the right edge when docked beside the
+        // keypad, upward from below when it covers it.
+        const int panelSlide = static_cast<int>((1.0f - m_panelAnim.Value()) * static_cast<float>(Dp(m_docked ? kPanelWidthDip : 28)));
 
         int y = 0;
 
@@ -1189,14 +1416,17 @@ namespace
         }
         y += navH;
 
-        if (m_mode == Mode::Converter)
+        if (m_mode == Mode::Converter || m_mode == Mode::Date)
         {
-            BuildConverterLayout(contentRight, height, y);
-            return;
-        }
-        if (m_mode == Mode::Date)
-        {
-            BuildDateLayout(contentRight, height, y);
+            if (m_mode == Mode::Converter)
+            {
+                BuildConverterLayout(contentRight, height, y);
+            }
+            else
+            {
+                BuildDateLayout(contentRight, height, y);
+            }
+            BuildOverlayLayout(width, height);
             return;
         }
 
@@ -1211,7 +1441,12 @@ namespace
         const bool overlay = (m_panel != Panel::None) && !m_docked;
         if (overlay)
         {
-            m_panelRect = { 0, y, width, height };
+            m_panelRect = { 0, y + panelSlide, width, height };
+        }
+        else if (m_docked)
+        {
+            m_panelRect.left += panelSlide;
+            m_panelRect.right += panelSlide;
         }
         else
         {
@@ -1514,6 +1749,9 @@ namespace
             clear.rc = { area.right - Dp(50), area.bottom - Dp(42), area.right - Dp(10), area.bottom - Dp(6) };
             m_buttons.push_back(clear);
         }
+
+        // Overlay surfaces sit above the content and slide in over it.
+        BuildOverlayLayout(width, height);
     }
 }
 
@@ -1647,42 +1885,63 @@ namespace
         g.FillPath(&brush, &path);
     }
 
-    COLORREF ButtonFill(const Btn& b, bool hot, bool pressed, bool& painted)
+    // Hover and press are blended in rather than switched, so a key lights up
+    // and settles the way a Fluent control does.
+    COLORREF ButtonFill(const Btn& b, float hot, float pressed, bool& painted)
     {
         painted = true;
         if (!b.enabled)
         {
             painted = (b.style == Style::Number || b.style == Style::Operator);
-            return g_theme.dark ? Mix(g_theme.operatorFill, g_theme.page, 0.5) : Mix(g_theme.operatorFill, g_theme.page, 0.5);
+            return Mix(g_theme.operatorFill, g_theme.page, 0.5);
         }
+
+        const float active = (hot > pressed) ? hot : pressed;
         switch (b.style)
         {
         case Style::Number:
-            return pressed ? g_theme.numberPress : hot ? g_theme.numberHover : g_theme.numberFill;
+            return Blend(Blend(g_theme.numberFill, g_theme.numberHover, hot), g_theme.numberPress, pressed);
         case Style::Operator:
-            return pressed ? g_theme.operatorPress : hot ? g_theme.operatorHover : g_theme.operatorFill;
+            return Blend(Blend(g_theme.operatorFill, g_theme.operatorHover, hot), g_theme.operatorPress, pressed);
         case Style::Accent:
-            return pressed ? g_theme.accentPress : hot ? g_theme.accentHover : g_theme.accent;
+            return Blend(Blend(g_theme.accent, g_theme.accentHover, hot), g_theme.accentPress, pressed);
         case Style::Toggle:
             if (b.checked)
             {
-                return pressed ? g_theme.accentPress : hot ? g_theme.accentHover : g_theme.accent;
+                return Blend(Blend(g_theme.accent, g_theme.accentHover, hot), g_theme.accentPress, pressed);
             }
-            painted = hot || pressed;
-            return pressed ? g_theme.flatPress : g_theme.flatHover;
+            painted = active > 0.004f;
+            return Blend(g_theme.flatHover, g_theme.flatPress, pressed);
         case Style::Bit:
-            painted = hot || pressed;
-            return pressed ? g_theme.flatPress : g_theme.flatHover;
+            painted = active > 0.004f;
+            return Blend(g_theme.flatHover, g_theme.flatPress, pressed);
         case Style::Flat:
         default:
             if (b.checked)
             {
                 painted = true;
-                return pressed ? g_theme.flatPress : g_theme.flatHover;
+                return Blend(g_theme.flatHover, g_theme.flatPress, pressed);
             }
-            painted = hot || pressed;
-            return pressed ? g_theme.flatPress : g_theme.flatHover;
+            painted = active > 0.004f;
+            return Blend(g_theme.flatHover, g_theme.flatPress, pressed);
         }
+    }
+
+    // How far through its hover and press animations a given button is.
+    void ButtonMotion(const CalcApp& app, const Btn& b, int index, int hotIndex, int pressedIndex, float& hot, float& pressed);
+
+    // Pointer-down shrinks the key slightly, as Fluent's pressed state does.
+    RECT PressedRect(const RECT& rc, float pressed)
+    {
+        if (pressed <= 0.001f)
+        {
+            return rc;
+        }
+        RECT r = rc;
+        const int dx = static_cast<int>((r.right - r.left) * 0.018f * pressed);
+        const int dy = static_cast<int>((r.bottom - r.top) * 0.018f * pressed);
+        InflateRect(&r, -dx, -dy);
+        return r;
     }
 
     COLORREF ButtonText(const Btn& b)
@@ -2002,7 +2261,147 @@ namespace
         }
     }
 
-    void PaintApp(HDC hdc, int width, int height)
+
+    // The navigation pane and settings page are surfaces above the content: an
+    // opaque panel with a soft edge, sliding in from the left.
+    void ButtonMotion(const CalcApp& app, const Btn& b, int index, int hotIndex, int pressedIndex, float& hot, float& pressed)
+    {
+        if (index == hotIndex)
+        {
+            hot = app.m_hoverIn.Value();
+        }
+        else if (b.action != ACT_NONE && b.action == app.m_hoverOutAction)
+        {
+            hot = app.m_hoverOut.Value();
+        }
+        if (index == pressedIndex)
+        {
+            pressed = app.m_pressAnim.Value();
+        }
+    }
+
+    void PaintNavOverlay(HDC hdc, CalcApp& app, int width, int height)
+    {
+        const bool nav = app.NavVisible();
+        const bool settings = !nav && app.SettingsVisible();
+        if (!nav && !settings)
+        {
+            return;
+        }
+
+        const float progress = nav ? app.m_navAnim.Value() : app.m_settingsAnim.Value();
+        const int slide = app.m_navSlide;
+
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+            // A scrim over the content, deepening as the pane comes in.
+            const BYTE scrim = static_cast<BYTE>(70.0f * progress);
+            if (scrim != 0)
+            {
+                Gdiplus::SolidBrush shade(ToGp(g_theme.dark ? RGB(0, 0, 0) : RGB(60, 60, 60), scrim));
+                g.FillRectangle(&shade, 0, 0, width, height);
+            }
+
+            RECT surface{ -slide, 0, width - slide, height };
+            Gdiplus::SolidBrush panel(ToGp(g_theme.dark ? Mix(g_theme.page, RGB(255, 255, 255), 0.04) : g_theme.card));
+            g.FillRectangle(
+                &panel,
+                static_cast<INT>(surface.left),
+                static_cast<INT>(surface.top),
+                static_cast<INT>(surface.right - surface.left),
+                static_cast<INT>(surface.bottom - surface.top));
+
+            Gdiplus::Pen edge(ToGp(g_theme.divider));
+            g.DrawLine(
+                &edge,
+                static_cast<INT>(surface.right),
+                static_cast<INT>(surface.top),
+                static_cast<INT>(surface.right),
+                static_cast<INT>(surface.bottom));
+
+            for (size_t i = 0; i < app.m_navButtons.size(); ++i)
+            {
+                const Btn& b = app.m_navButtons[i];
+                float hot = 0.0f;
+                float pressed = 0.0f;
+                ButtonMotion(app, b, static_cast<int>(i), app.m_hotNav, app.m_pressedNav, hot, pressed);
+                bool painted = false;
+                const COLORREF fill = ButtonFill(b, hot, pressed, painted);
+                if (painted)
+                {
+                    FillRounded(g, PressedRect(b.rc, pressed), Dp(kRadiusDip), fill);
+                }
+            }
+        }
+
+        for (const Btn& b : app.m_navButtons)
+        {
+            if (b.label.empty())
+            {
+                continue;
+            }
+            const COLORREF color = ButtonText(b);
+            if (b.icon)
+            {
+                DrawLabel(hdc, b.rc, b.label, DefaultTextDip(b), color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            else
+            {
+                RECT text = b.rc;
+                if (b.leftAlign)
+                {
+                    text.left += Dp(44);
+                }
+                DrawLabel(
+                    hdc, text, b.label, DefaultTextDip(b), color, false,
+                    DT_SINGLELINE | (b.leftAlign ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+        }
+
+        if (nav)
+        {
+            for (const auto& entry : app.m_navGlyphs)
+            {
+                if (entry.rc.right == entry.rc.left || entry.glyph.empty())
+                {
+                    continue;
+                }
+                RECT glyph = entry.rc;
+                glyph.left += Dp(10);
+                glyph.right = glyph.left + Dp(28);
+                DrawLabel(hdc, glyph, entry.glyph, 15, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            return;
+        }
+
+        RECT title{ Dp(14) - slide, Dp(50), width - Dp(14) - slide, Dp(84) };
+        DrawLabel(hdc, title, L"Settings", 22, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
+
+        RECT about{ Dp(14) - slide, Dp(160), width - Dp(14) - slide, Dp(200) };
+        DrawLabel(hdc, about, L"About", 16, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+
+        const wchar_t* lines[] = {
+            L"Calculator",
+            L"Version 1.0.0.0",
+            L"",
+            L"Built from the Windows Calculator engine",
+            L"(github.com/microsoft/calculator).",
+            L"Licensed under the MIT License.",
+        };
+        int y = Dp(200);
+        for (const wchar_t* line : lines)
+        {
+            RECT row{ Dp(14) - slide, y, width - Dp(14) - slide, y + Dp(22) };
+            DrawLabel(hdc, row, line, 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            y += Dp(22);
+        }
+    }
+
+    // Everything below the overlay surfaces. Split out so a mode change can
+    // render it to its own layer and fade that in.
+    void PaintContent(HDC hdc, int width, int height)
     {
         CalcApp& app = g_app;
 
@@ -2026,37 +2425,45 @@ namespace
             for (size_t i = 0; i < app.m_buttons.size(); ++i)
             {
                 const Btn& b = app.m_buttons[i];
+                float hot = 0.0f;
+                float pressed = 0.0f;
+                ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
                 bool painted = false;
-                const COLORREF fill = ButtonFill(b, static_cast<int>(i) == app.m_hot, static_cast<int>(i) == app.m_pressed, painted);
+                const COLORREF fill = ButtonFill(b, hot, pressed, painted);
                 if (painted)
                 {
-                    FillRounded(g, b.rc, Dp(kRadiusDip), fill);
+                    FillRounded(g, PressedRect(b.rc, pressed), Dp(kRadiusDip), fill);
                 }
             }
         }
 
         // --- text ---------------------------------------------------------
-        for (const Btn& b : app.m_buttons)
+        for (size_t i = 0; i < app.m_buttons.size(); ++i)
         {
+            const Btn& b = app.m_buttons[i];
             if (b.label.empty())
             {
                 continue;
             }
+            float hot = 0.0f;
+            float pressed = 0.0f;
+            ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
+            const RECT rc = PressedRect(b.rc, pressed);
             const int dip = DefaultTextDip(b);
             const COLORREF color = ButtonText(b);
             if (b.icon)
             {
-                DrawLabel(hdc, b.rc, b.label, dip, color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                DrawLabel(hdc, rc, b.label, dip, color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             }
             else if (b.leftAlign)
             {
-                RECT text = b.rc;
+                RECT text = rc;
                 text.left += Dp(44); // clear of the leading glyph
                 DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             }
             else
             {
-                DrawMixedLabel(hdc, b.rc, b.label, dip, color);
+                DrawMixedLabel(hdc, rc, b.label, dip, color);
             }
         }
 
@@ -2064,48 +2471,6 @@ namespace
         {
             RECT title{ Dp(50), Dp(4), width - Dp(50), Dp(42) };
             DrawLabel(hdc, title, app.ModeName(), 15, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
-        }
-
-        if (app.m_navOpen)
-        {
-            for (const auto& entry : app.m_navGlyphs)
-            {
-                if (entry.rc.right == 0 || entry.glyph.empty())
-                {
-                    continue;
-                }
-                RECT glyph = entry.rc;
-                glyph.left += Dp(10);
-                glyph.right = glyph.left + Dp(28);
-                DrawLabel(hdc, glyph, entry.glyph, 15, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-            }
-            return;
-        }
-
-        if (app.m_settingsOpen)
-        {
-            RECT title{ Dp(14), Dp(50), width - Dp(14), Dp(84) };
-            DrawLabel(hdc, title, L"Settings", 22, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
-
-            RECT about{ Dp(14), Dp(160), width - Dp(14), Dp(200) };
-            DrawLabel(hdc, about, L"About", 16, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
-
-            const wchar_t* lines[] = {
-                L"Calculator",
-                L"Version 1.0.0.0",
-                L"",
-                L"Built from the Windows Calculator engine",
-                L"(github.com/microsoft/calculator).",
-                L"Licensed under the MIT License.",
-            };
-            int y = Dp(200);
-            for (const wchar_t* line : lines)
-            {
-                RECT row{ Dp(14), y, width - Dp(14), y + Dp(22) };
-                DrawLabel(hdc, row, line, 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-                y += Dp(22);
-            }
-            return;
         }
 
         if (app.m_mode == Mode::Converter)
@@ -2174,36 +2539,116 @@ namespace
             PaintPanelContents(hdc, app);
         }
 
-        // --- overlay menus -------------------------------------------------
-        if (app.m_navOpen || app.m_menuOpen)
-        {
-            {
-                Gdiplus::Graphics g(hdc);
-                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                RECT shadow = app.m_menuRect;
-                InflateRect(&shadow, Dp(2), Dp(2));
-                FillRounded(g, shadow, Dp(9), g_theme.dark ? RGB(0, 0, 0) : RGB(120, 120, 120), 60);
-                FillRounded(g, app.m_menuRect, Dp(8), g_theme.dark ? RGB(45, 45, 45) : RGB(252, 252, 252));
+    }
 
-                for (size_t i = 0; i < app.m_menuButtons.size(); ++i)
+    // The overlay surfaces: navigation pane or settings page, then any dropdown.
+    void PaintFlyout(HDC hdc)
+    {
+        CalcApp& app = g_app;
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            RECT shadow = app.m_menuRect;
+            InflateRect(&shadow, Dp(2), Dp(2));
+            FillRounded(g, shadow, Dp(9), g_theme.dark ? RGB(0, 0, 0) : RGB(120, 120, 120), 60);
+            FillRounded(g, app.m_menuRect, Dp(8), g_theme.dark ? RGB(45, 45, 45) : RGB(252, 252, 252));
+
+            for (size_t i = 0; i < app.m_menuButtons.size(); ++i)
+            {
+                if (static_cast<int>(i) == app.m_hotMenu)
                 {
-                    if (static_cast<int>(i) == app.m_hotMenu)
-                    {
-                        FillRounded(g, app.m_menuButtons[i].rc, Dp(4), g_theme.flatHover);
-                    }
-                    else if (app.m_menuButtons[i].checked)
-                    {
-                        FillRounded(g, app.m_menuButtons[i].rc, Dp(4), g_theme.flatPress);
-                    }
+                    FillRounded(g, app.m_menuButtons[i].rc, Dp(4), g_theme.flatHover);
+                }
+                else if (app.m_menuButtons[i].checked)
+                {
+                    FillRounded(g, app.m_menuButtons[i].rc, Dp(4), g_theme.flatPress);
                 }
             }
-            for (const Btn& b : app.m_menuButtons)
-            {
-                RECT r = b.rc;
-                r.left += Dp(12);
-                DrawLabel(hdc, r, b.label, 13, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-            }
         }
+        for (const Btn& b : app.m_menuButtons)
+        {
+            RECT r = b.rc;
+            r.left += Dp(12);
+            DrawLabel(hdc, r, b.label, 13, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        }
+    }
+
+    void PaintOverlays(HDC hdc, int width, int height)
+    {
+        CalcApp& app = g_app;
+        SetBkMode(hdc, TRANSPARENT);
+        PaintNavOverlay(hdc, app, width, height);
+
+        const float menu = app.m_menuAnim.Value();
+        if (app.m_menuButtons.empty() || menu <= 0.004f)
+        {
+            return;
+        }
+        if (menu >= 0.999f)
+        {
+            PaintFlyout(hdc);
+            return;
+        }
+
+        // Fading the flyout means compositing it over a copy of the frame, since
+        // GDI text has no alpha of its own.
+        const int lift = static_cast<int>(Dp(10) * (1.0f - menu));
+        HDC layer = CreateCompatibleDC(hdc);
+        HBITMAP layerBitmap = CreateCompatibleBitmap(hdc, width, height);
+        HGDIOBJ previous = SelectObject(layer, layerBitmap);
+        BitBlt(layer, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
+        SetBkMode(layer, TRANSPARENT);
+        PaintFlyout(layer);
+
+        BLENDFUNCTION blend{};
+        blend.BlendOp = AC_SRC_OVER;
+        blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * menu);
+        AlphaBlend(hdc, 0, lift, width, height - lift, layer, 0, 0, width, height - lift, blend);
+
+        SelectObject(layer, previous);
+        DeleteObject(layerBitmap);
+        DeleteDC(layer);
+    }
+
+    // Composites the frame: content (faded and lifted while a mode is entering)
+    // with the overlay surfaces on top.
+    void PaintApp(HDC hdc, int width, int height)
+    {
+        CalcApp& app = g_app;
+        const float enter = app.m_contentAnim.Value();
+
+        if (enter >= 0.999f || width <= 0 || height <= 0)
+        {
+            PaintContent(hdc, width, height);
+            PaintOverlays(hdc, width, height);
+            return;
+        }
+
+        // Content rises into place as it fades in, matching the app's
+        // page-transition motion.
+        const int rise = static_cast<int>(Dp(16) * (1.0f - enter));
+
+        RECT full{ 0, 0, width, height };
+        HBRUSH background = CreateSolidBrush(g_theme.page);
+        FillRect(hdc, &full, background);
+        DeleteObject(background);
+
+        HDC layer = CreateCompatibleDC(hdc);
+        HBITMAP layerBitmap = CreateCompatibleBitmap(hdc, width, height);
+        HGDIOBJ previous = SelectObject(layer, layerBitmap);
+
+        PaintContent(layer, width, height);
+
+        BLENDFUNCTION blend{};
+        blend.BlendOp = AC_SRC_OVER;
+        blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * enter);
+        AlphaBlend(hdc, 0, rise, width, height - rise, layer, 0, 0, width, height - rise, blend);
+
+        SelectObject(layer, previous);
+        DeleteObject(layerBitmap);
+        DeleteDC(layer);
+
+        PaintOverlays(hdc, width, height);
     }
 }
 
@@ -2294,6 +2739,9 @@ namespace
         app.m_hotMenu = -1;
         app.LayoutMenu();
         app.m_menuOpen = true;
+        app.m_menuAnim.Set(0.0f);
+        app.m_menuAnim.To(1.0f, kMotionFastMs);
+        app.EnsureFrameTimer();
         app.Invalidate();
     }
 
@@ -2388,6 +2836,8 @@ namespace
         {
             app.m_menuOpen = false;
             app.m_menuButtons.clear();
+            app.m_menuAnim.To(0.0f, kMotionFastMs, EaseStandard);
+            app.EnsureFrameTimer();
             app.Invalidate();
         }
     }
@@ -2636,11 +3086,17 @@ namespace
             app.m_navOpen = !app.m_navOpen;
             app.m_settingsOpen = false;
             app.m_navScroll = 0;
+            app.m_navAnim.To(app.m_navOpen ? 1.0f : 0.0f, kMotionNormalMs);
+            app.m_settingsAnim.To(0.0f, kMotionNormalMs);
+            app.EnsureFrameTimer();
             app.Relayout();
             break;
         case ACT_SETTINGS:
             app.m_settingsOpen = !app.m_settingsOpen;
             app.m_navOpen = false;
+            app.m_settingsAnim.To(app.m_settingsOpen ? 1.0f : 0.0f, kMotionNormalMs);
+            app.m_navAnim.To(0.0f, kMotionNormalMs);
+            app.EnsureFrameTimer();
             app.Relayout();
             break;
         case ACT_ALWAYS_ON_TOP:
@@ -2715,6 +3171,12 @@ namespace
         case ACT_TOGGLE_PANEL:
             app.m_panel = (app.m_panel == Panel::None) ? (app.m_mode == Mode::Programmer ? Panel::Memory : Panel::History) : Panel::None;
             app.m_historyScroll = 0;
+            if (app.m_panel != Panel::None)
+            {
+                app.m_panelAnim.Set(0.0f);
+                app.m_panelAnim.To(1.0f, kMotionNormalMs);
+                app.EnsureFrameTimer();
+            }
             app.Relayout();
             break;
         case ACT_PANEL_HISTORY:
@@ -3134,18 +3596,29 @@ namespace
 
             int hotMenu = -1;
             int hot = -1;
+            int hotNav = -1;
             if (app.m_menuOpen)
             {
                 hotMenu = HitTest(app.m_menuButtons, pt);
+            }
+            else if (app.NavVisible() || app.SettingsVisible())
+            {
+                hotNav = HitTest(app.m_navButtons, pt);
             }
             else
             {
                 hot = HitTest(app.m_buttons, pt);
             }
-            if (hot != app.m_hot || hotMenu != app.m_hotMenu)
+
+            if (hot != app.m_hot || hotMenu != app.m_hotMenu || hotNav != app.m_hotNav)
             {
                 app.m_hot = hot;
                 app.m_hotMenu = hotMenu;
+                app.m_hotNav = hotNav;
+                const int action = (hot >= 0) ? app.m_buttons[static_cast<size_t>(hot)].action
+                    : (hotNav >= 0)           ? app.m_navButtons[static_cast<size_t>(hotNav)].action
+                                              : ACT_NONE;
+                app.SetHover(action);
                 app.Invalidate();
             }
             return 0;
@@ -3154,6 +3627,8 @@ namespace
         case WM_MOUSELEAVE:
             app.m_hot = -1;
             app.m_hotMenu = -1;
+            app.m_hotNav = -1;
+            app.SetHover(ACT_NONE);
             app.Invalidate();
             return 0;
 
@@ -3161,6 +3636,7 @@ namespace
         {
             SetFocus(hwnd);
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
             if (app.m_menuOpen)
             {
                 const int index = HitTest(app.m_menuButtons, pt);
@@ -3170,14 +3646,31 @@ namespace
                 }
                 else
                 {
-                    const int action = app.m_menuButtons[index].action;
+                    const int action = app.m_menuButtons[static_cast<size_t>(index)].action;
                     CloseMenus();
                     Execute(action);
                     app.Invalidate();
                 }
                 return 0;
             }
-            app.m_pressed = HitTest(app.m_buttons, pt);
+
+            app.m_pressed = -1;
+            app.m_pressedNav = -1;
+            if (app.NavVisible() || app.SettingsVisible())
+            {
+                app.m_pressedNav = HitTest(app.m_navButtons, pt);
+            }
+            else
+            {
+                app.m_pressed = HitTest(app.m_buttons, pt);
+            }
+
+            if (app.m_pressed >= 0 || app.m_pressedNav >= 0)
+            {
+                app.m_pressAnim.Set(0.0f);
+                app.m_pressAnim.To(1.0f, kMotionFastMs, EaseStandard);
+                app.EnsureFrameTimer();
+            }
             app.Invalidate();
             return 0;
         }
@@ -3186,10 +3679,27 @@ namespace
         {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             const int pressed = app.m_pressed;
-            app.m_pressed = -1;
-            if (pressed >= 0 && pressed < static_cast<int>(app.m_buttons.size()) && PtInRect(&app.m_buttons[pressed].rc, pt))
+            const int pressedNav = app.m_pressedNav;
+            app.m_pressAnim.To(0.0f, kMotionFastMs, EaseStandard);
+            app.EnsureFrameTimer();
+
+            int action = ACT_NONE;
+            if (pressedNav >= 0 && pressedNav < static_cast<int>(app.m_navButtons.size())
+                && PtInRect(&app.m_navButtons[static_cast<size_t>(pressedNav)].rc, pt))
             {
-                Execute(app.m_buttons[pressed].action);
+                action = app.m_navButtons[static_cast<size_t>(pressedNav)].action;
+            }
+            else if (pressed >= 0 && pressed < static_cast<int>(app.m_buttons.size())
+                     && PtInRect(&app.m_buttons[static_cast<size_t>(pressed)].rc, pt))
+            {
+                action = app.m_buttons[static_cast<size_t>(pressed)].action;
+            }
+
+            app.m_pressed = -1;
+            app.m_pressedNav = -1;
+            if (action != ACT_NONE)
+            {
+                Execute(action);
             }
             app.Invalidate();
             return 0;
@@ -3222,7 +3732,23 @@ namespace
             {
                 KillTimer(hwnd, 1);
                 app.m_pressed = -1;
+                app.m_pressAnim.To(0.0f, kMotionFastMs, EaseStandard);
+                app.EnsureFrameTimer();
                 app.Invalidate();
+            }
+            else if (wParam == 2)
+            {
+                // Animations that move controls also move their hit targets, so
+                // those frames relayout rather than just repaint.
+                if (app.m_navAnim.Active() || app.m_settingsAnim.Active() || app.m_panelAnim.Active())
+                {
+                    app.Relayout();
+                }
+                else
+                {
+                    app.Invalidate();
+                }
+                app.EnsureFrameTimer();
             }
             return 0;
 
@@ -3590,6 +4116,9 @@ namespace
     {
         const int pad = Dp(kPadDip);
         const int rowHeight = Dp(38);
+        // The pane slides in from the left edge, the way a WinUI NavigationView
+        // overlay does.
+        m_navSlide = width - static_cast<int>(static_cast<float>(width) * m_navAnim.Value());
 
         Btn close;
         close.label = L"";
@@ -3598,7 +4127,7 @@ namespace
         close.icon = true;
         close.textDip = 14;
         close.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
-        m_buttons.push_back(close);
+        PushNav(close);
 
         const int listTop = Dp(kNavRowDip);
         const int listBottom = height - Dp(52);
@@ -3618,8 +4147,11 @@ namespace
                 row.textDip = header ? 12 : 14;
                 row.leftAlign = true;
                 row.rc = { pad + Dp(8), y, width - Dp(8), y + rowHeight - Dp(2) };
-                m_navGlyphs.push_back({ glyph, row.rc, header });
-                m_buttons.push_back(row);
+                RECT glyphRect = row.rc;
+                glyphRect.left -= m_navSlide;
+                glyphRect.right -= m_navSlide;
+                m_navGlyphs.push_back({ glyph, glyphRect, header });
+                PushNav(row);
             }
             else
             {
@@ -3656,13 +4188,17 @@ namespace
         settings.textDip = 14;
         settings.leftAlign = true;
         settings.rc = { pad + Dp(8), height - Dp(44), width - Dp(8), height - Dp(8) };
-        m_navGlyphs.push_back({ L"", settings.rc, false });
-        m_buttons.push_back(settings);
+        RECT settingsGlyph = settings.rc;
+        settingsGlyph.left -= m_navSlide;
+        settingsGlyph.right -= m_navSlide;
+        m_navGlyphs.push_back({ L"", settingsGlyph, false });
+        PushNav(settings);
     }
 
     void CalcApp::BuildSettingsLayout(int width, int height)
     {
         const int pad = Dp(kPadDip);
+        m_navSlide = width - static_cast<int>(static_cast<float>(width) * m_settingsAnim.Value());
 
         Btn back;
         back.label = L"";
@@ -3671,7 +4207,7 @@ namespace
         back.icon = true;
         back.textDip = 14;
         back.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
-        m_buttons.push_back(back);
+        PushNav(back);
 
         Btn onTop;
         onTop.label = m_alwaysOnTop ? L"Always on top: On" : L"Always on top: Off";
@@ -3681,7 +4217,7 @@ namespace
         onTop.textDip = 14;
         onTop.leftAlign = true;
         onTop.rc = { pad + Dp(12), Dp(96), width - Dp(12), Dp(136) };
-        m_buttons.push_back(onTop);
+        PushNav(onTop);
 
         m_navContentHeight = height;
     }
