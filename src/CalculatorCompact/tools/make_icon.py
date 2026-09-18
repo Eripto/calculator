@@ -130,8 +130,10 @@ def bmp_bytes(pixels):
 def main():
     # 16px stays uncompressed for the widest shell compatibility; everything
     # above is PNG-compressed (supported since Vista), which keeps the whole
-    # icon at a few KB instead of ~150KB of raw bitmaps.
-    sizes = [16, 24, 32, 48, 64, 128, 256]
+    # icon at a few KB instead of ~150KB of raw bitmaps. 64 and 128 are omitted:
+    # Windows scales the 256px entry down for those, and the icon is flat enough
+    # that the result is indistinguishable.
+    sizes = [16, 24, 32, 48, 256]
     entries = []
     for size in sizes:
         pixels = render(size)

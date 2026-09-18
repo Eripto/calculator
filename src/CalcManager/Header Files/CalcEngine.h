@@ -25,6 +25,7 @@
 #include "CalcUtils.h"
 #include "ICalcDisplay.h"
 #include "Rational.h"
+#include "NumericString.h"
 #include "RationalMath.h"
 
 // The following are NOT real exports of CalcEngine, but for forward declarations
@@ -97,7 +98,7 @@ public:
     // returns the ptr to string representing the operator. Mostly same as the button, but few special cases for x^y etc.
     static std::wstring_view GetString(int ids)
     {
-        return s_engineStrings[std::to_wstring(ids)];
+        return s_engineStrings[CalcEngine::NumericString::FromInteger(ids)];
     }
     static std::wstring_view GetString(std::wstring_view ids)
     {

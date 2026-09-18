@@ -20,15 +20,24 @@ echo "==> building engine for tests"
 OBJECTS=()
 while IFS= read -r file; do
   case "$file" in
-    # pch.cpp is MSVC-only; UnitConverter/NumberFormattingUtils belong to the
-    # converter modes. scidisp.cpp is compiled into the test itself so the
+    # pch.cpp is MSVC-only. scidisp.cpp is compiled into the test itself so the
     # file-static decimal parser is reachable.
-    */pch.cpp|*/UnitConverter.cpp|*/NumberFormattingUtils.cpp|*/scidisp.cpp) continue ;;
+    */pch.cpp|*/scidisp.cpp) continue ;;
   esac
   name="$(basename "$file" .cpp)_$(printf '%s' "$file" | cksum | cut -d' ' -f1).o"
   "$CXX" "${FLAGS[@]}" -c "$file" -o "$OUT/$name"
   OBJECTS+=("$OUT/$name")
 done < <(find "$ENGINE" -name '*.cpp' | sort)
+
+echo "==> building front-end models"
+for file in "$ROOT"/app/*.cpp; do
+  case "$file" in
+    */main.cpp) continue ;;   # Win32 UI, not host-buildable
+  esac
+  name="$(basename "$file" .cpp).o"
+  "$CXX" "${FLAGS[@]}" -c "$file" -o "$OUT/$name"
+  OBJECTS+=("$OUT/$name")
+done
 
 echo "==> building tests"
 "$CXX" "${FLAGS[@]}" -c "$ROOT/tests/engine_tests.cpp" -o "$OUT/engine_tests.o"

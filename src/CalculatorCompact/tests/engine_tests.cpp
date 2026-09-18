@@ -14,6 +14,7 @@
 //      functions, programmer radices, memory, history and error handling.
 
 #include <iostream>
+#include <random>
 #include <regex>
 #include <string>
 #include <vector>
@@ -23,10 +24,14 @@
 #include "Command.h"
 #include "EngineStringTable.h"
 #include "Header Files/CalcEngine.h"
+#include "Header Files/NumericString.h"
 #include "Header Files/RadixType.h"
 
 // Brings in the file-static MatchDecimalNumber under test.
 #include "CEngine/scidisp.cpp"
+
+#include "ConverterModel.h"
+#include "DateCalcModel.h"
 
 using namespace CalculationManager;
 
@@ -171,7 +176,7 @@ namespace
             if (id == L"sGrouping") return L"3;0";
             for (const auto& entry : CalcCompact::kEngineStrings)
             {
-                if (entry.id == id)
+                if (id.compare(entry.id) == 0)
                 {
                     return std::wstring(entry.value);
                 }
@@ -460,6 +465,65 @@ namespace
         Check(h.display.expression.find(L"fact") != std::wstring::npos, "factorial token present");
     }
 
+    // The rand command formats its value with TryExactFixedPointBelowOne; check
+    // it against the host C library over a wide range of inputs.
+    void TestExactFixedPoint()
+    {
+        std::cout << "exact fixed-point formatter\n";
+        std::mt19937_64 rng(20240918);
+        long long compared = 0, mismatches = 0;
+
+        auto reference = [](double value, int precision) {
+            std::wstring buffer(static_cast<size_t>(precision) + 340, L'\0');
+            const int written = swprintf(buffer.data(), buffer.size(), L"%.*f", precision, value);
+            buffer.resize(written > 0 ? static_cast<size_t>(written) : 0);
+            return buffer;
+        };
+
+        for (int precision : { 0, 1, 2, 5, 16, 17, 32, 40, 53 })
+        {
+            for (int i = 0; i < 4000; ++i)
+            {
+                // Exactly the shape generate_canonical produces: k / 2^53.
+                const unsigned long long k = rng() >> 11;
+                const double value = static_cast<double>(k) / 9007199254740992.0;
+
+                std::wstring actual;
+                const bool ok = CalcEngine::NumericString::TryExactFixedPointBelowOne(value, precision, actual);
+                ++compared;
+                if (!ok)
+                {
+                    ++mismatches;
+                    continue;
+                }
+                const std::wstring expected = reference(value, precision);
+                if (actual != expected)
+                {
+                    if (++mismatches <= 5)
+                    {
+                        std::cout << "  FAIL: p=" << precision << " expected \"" << Narrow(expected) << "\" got \"" << Narrow(actual) << "\"\n";
+                    }
+                }
+            }
+        }
+
+        // Carry propagation and the boundaries.
+        std::wstring out;
+        Check(CalcEngine::NumericString::TryExactFixedPointBelowOne(0.0, 8, out) && out == L"0.00000000", "zero");
+        Check(!CalcEngine::NumericString::TryExactFixedPointBelowOne(1.0, 8, out), "1.0 is out of range");
+        Check(!CalcEngine::NumericString::TryExactFixedPointBelowOne(-0.5, 8, out), "negative is out of range");
+        // 1 - 2^-53 rounds up to 1 at low precision, exercising the carry.
+        const double almostOne = 1.0 - 1.0 / 9007199254740992.0;
+        Check(CalcEngine::NumericString::TryExactFixedPointBelowOne(almostOne, 4, out) && out == L"1.0000", "carry propagates to the integer part");
+
+        ++g_checks;
+        if (mismatches != 0)
+        {
+            ++g_failures;
+        }
+        std::cout << "  compared " << compared << " values, " << mismatches << " mismatches\n";
+    }
+
     void TestRandom()
     {
         // The rand command formats a double with swprintf now instead of a
@@ -487,6 +551,210 @@ namespace
     }
 }
 
+namespace
+{
+    void TestConverter()
+    {
+        std::cout << "unit converter\n";
+        CalcCompact::ConverterModel model;
+
+        Check(model.Categories().size() == 12, "twelve converter categories");
+
+        auto typeInto = [&model](const wchar_t* digits) {
+            model.Clear();
+            for (const wchar_t* p = digits; *p; ++p)
+            {
+                model.Send(CalcCompact::ConverterCommandForChar(*p, L'.'));
+            }
+        };
+
+        // Volume: 1 US gallon is 3.785411784 litres.
+        model.SetCategory(4);
+        const auto& volumeUnits = model.Units();
+        Check(!volumeUnits.empty(), "volume has units");
+        int gallon = 0, litre = 0;
+        for (const auto& u : volumeUnits)
+        {
+            if (u.name == L"Gallons (US)") gallon = u.id;
+            if (u.name == L"Liters") litre = u.id;
+        }
+        Check(gallon != 0 && litre != 0, "found gallon and litre");
+        model.SetUnits(gallon, litre);
+        typeInto(L"1");
+        // The converter shows seven significant digits, as the shipping app does.
+        CheckEqual(model.ToValue(), L"3.785412", "1 gal (US) -> L");
+
+        // Length: 1 mile is 1.609344 km.
+        model.SetCategory(5);
+        int mile = 0, kilometre = 0;
+        for (const auto& u : model.Units())
+        {
+            if (u.name == L"Miles") mile = u.id;
+            if (u.name == L"Kilometers") kilometre = u.id;
+        }
+        model.SetUnits(mile, kilometre);
+        typeInto(L"1");
+        CheckEqual(model.ToValue(), L"1.609344", "1 mile -> km");
+
+        // Temperature uses the explicit ratio/offset table.
+        model.SetCategory(7);
+        int celsius = 0, fahrenheit = 0, kelvin = 0;
+        for (const auto& u : model.Units())
+        {
+            if (u.name == L"Celsius") celsius = u.id;
+            if (u.name == L"Fahrenheit") fahrenheit = u.id;
+            if (u.name == L"Kelvin") kelvin = u.id;
+        }
+        model.SetUnits(celsius, fahrenheit);
+        typeInto(L"100");
+        CheckEqual(model.ToValue(), L"212", "100 C -> F");
+        typeInto(L"0");
+        CheckEqual(model.ToValue(), L"32", "0 C -> F");
+        model.SetUnits(celsius, kelvin);
+        typeInto(L"0");
+        CheckEqual(model.ToValue(), L"273.15", "0 C -> K");
+        model.SetUnits(fahrenheit, celsius);
+        typeInto(L"212");
+        CheckEqual(model.ToValue(), L"100", "212 F -> C");
+        Check(model.SupportsNegative(), "temperature supports negative values");
+
+        // Data: 1 GB is 1000 MB in the shipping table.
+        model.SetCategory(13);
+        int gigabyte = 0, megabyte = 0;
+        for (const auto& u : model.Units())
+        {
+            if (u.name == L"Gigabytes") gigabyte = u.id;
+            if (u.name == L"Megabytes") megabyte = u.id;
+        }
+        model.SetUnits(gigabyte, megabyte);
+        typeInto(L"1");
+        CheckEqual(model.ToValue(), L"1000", "1 GB -> MB");
+
+        // Angle: 180 degrees is pi radians.
+        model.SetCategory(15);
+        int degree = 0, radian = 0;
+        for (const auto& u : model.Units())
+        {
+            if (u.name == L"Degrees") degree = u.id;
+            if (u.name == L"Radians") radian = u.id;
+        }
+        model.SetUnits(degree, radian);
+        typeInto(L"180");
+        Check(model.ToValue().substr(0, 7) == L"3.14159", "180 deg -> rad");
+
+        // Editing the second field converts backwards.
+        model.SetCategory(5);
+        model.SetUnits(mile, kilometre);
+        model.Clear();
+        model.SetActiveField(true);
+        model.Send(CalcCompact::ConverterCommandForChar(L'1', L'.'));
+        CheckEqual(model.FromValue(), L"0.621371", "1 km -> miles (editing the second field)");
+        CheckEqual(model.ToValue(), L"1", "second field holds what was typed");
+        model.SetActiveField(false);
+
+        // Every category must expose units and a usable default pair.
+        for (const auto& category : model.Categories())
+        {
+            model.SetCategory(category.id);
+            Check(!model.Units().empty(), "category has units");
+            Check(model.FromUnitId() != model.ToUnitId() || model.Units().size() == 1, "distinct default units");
+        }
+    }
+}
+
+namespace
+{
+    void TestDateCalculation()
+    {
+        std::cout << "date calculation\n";
+        using namespace CalcCompact;
+
+        // Round-trip the civil-date conversion across a wide span, including
+        // every leap-year rule boundary.
+        long long checked = 0, bad = 0;
+        for (long long day = -60000; day <= 40000; day += 7)
+        {
+            const CivilDate date = DateMath::FromDayNumber(day);
+            if (DateMath::ToDayNumber(date) != day)
+            {
+                ++bad;
+            }
+            ++checked;
+        }
+        Check(bad == 0, "day-number round trip");
+
+        Check(DateMath::IsLeapYear(2000), "2000 is a leap year");
+        Check(!DateMath::IsLeapYear(1900), "1900 is not a leap year");
+        Check(DateMath::IsLeapYear(2024), "2024 is a leap year");
+        Check(DateMath::DaysInMonth(2024, 2) == 29, "February 2024 has 29 days");
+        Check(DateMath::DaysInMonth(2023, 2) == 28, "February 2023 has 28 days");
+
+        // Known weekday anchors.
+        CheckEqual(DateMath::WeekdayName(CivilDate{ 1970, 1, 1 }), L"Thursday", "1970-01-01 was a Thursday");
+        CheckEqual(DateMath::WeekdayName(CivilDate{ 2000, 1, 1 }), L"Saturday", "2000-01-01 was a Saturday");
+        CheckEqual(DateMath::WeekdayName(CivilDate{ 2024, 2, 29 }), L"Thursday", "2024-02-29 was a Thursday");
+
+        // End-of-month clamping, as the calendar does it.
+        Check(DateMath::AddMonths(CivilDate{ 2024, 1, 31 }, 1) == (CivilDate{ 2024, 2, 29 }), "31 Jan + 1 month clamps to 29 Feb");
+        Check(DateMath::AddMonths(CivilDate{ 2023, 1, 31 }, 1) == (CivilDate{ 2023, 2, 28 }), "31 Jan + 1 month clamps to 28 Feb");
+        Check(DateMath::AddMonths(CivilDate{ 2023, 12, 15 }, 1) == (CivilDate{ 2024, 1, 15 }), "month addition crosses the year");
+        Check(DateMath::AddMonths(CivilDate{ 2024, 1, 15 }, -1) == (CivilDate{ 2023, 12, 15 }), "month subtraction crosses the year");
+
+        Check(DateMath::AddDays(CivilDate{ 2024, 2, 28 }, 1) == (CivilDate{ 2024, 2, 29 }), "leap day follows 28 Feb 2024");
+        Check(DateMath::AddDays(CivilDate{ 2023, 2, 28 }, 1) == (CivilDate{ 2023, 3, 1 }), "1 March follows 28 Feb 2023");
+
+        // Differences.
+        auto diff = DateMath::Difference(CivilDate{ 2024, 1, 1 }, CivilDate{ 2024, 12, 31 });
+        Check(diff.totalDays == 365, "2024-01-01 to 2024-12-31 is 365 days");
+        Check(diff.years == 0 && diff.months == 11, "...which is 11 months and change");
+
+        diff = DateMath::Difference(CivilDate{ 2000, 1, 1 }, CivilDate{ 2025, 6, 15 });
+        Check(diff.years == 25 && diff.months == 5 && diff.weeks == 2, "25 years 5 months 2 weeks");
+        Check(diff.totalDays == 9297, "total days across 25 years");
+
+        // Order must not matter.
+        const auto forward = DateMath::Difference(CivilDate{ 2020, 3, 1 }, CivilDate{ 2021, 5, 20 });
+        const auto backward = DateMath::Difference(CivilDate{ 2021, 5, 20 }, CivilDate{ 2020, 3, 1 });
+        Check(forward.totalDays == backward.totalDays && forward.years == backward.years, "difference is symmetric");
+
+        // Same date.
+        diff = DateMath::Difference(CivilDate{ 2024, 5, 5 }, CivilDate{ 2024, 5, 5 });
+        Check(diff.totalDays == 0 && diff.years == 0 && diff.months == 0 && diff.weeks == 0 && diff.days == 0, "same date is zero");
+        CheckEqual(DateMath::DescribeDifference(diff), L"Same dates", "same-date wording");
+
+        // Reconstructing the end date from the decomposition must land exactly.
+        long long mismatches = 0;
+        for (int i = 0; i < 400; ++i)
+        {
+            const CivilDate a = DateMath::FromDayNumber(-20000 + i * 137);
+            const CivilDate b = DateMath::FromDayNumber(-20000 + i * 137 + i * 29);
+            const auto d = DateMath::Difference(a, b);
+            CivilDate rebuilt = DateMath::AddMonths(a, static_cast<long long>(d.years) * 12 + d.months);
+            rebuilt = DateMath::AddDays(rebuilt, static_cast<long long>(d.weeks) * 7 + d.days);
+            if (!(rebuilt == b))
+            {
+                ++mismatches;
+            }
+        }
+        Check(mismatches == 0, "difference decomposition rebuilds the end date");
+
+        // The add/subtract mode.
+        DateCalcModel model;
+        model.SetMode(DateCalcModel::Mode::AddSubtract);
+        model.Start() = CivilDate{ 2024, 1, 31 };
+        model.SetAdding(true);
+        model.OffsetMonths() = 1;
+        Check(model.Result() == (CivilDate{ 2024, 2, 29 }), "add one month clamps");
+        model.OffsetMonths() = 0;
+        model.OffsetDays() = 30;
+        Check(model.Result() == (CivilDate{ 2024, 3, 1 }), "add 30 days");
+        model.SetAdding(false);
+        Check(model.Result() == (CivilDate{ 2024, 1, 1 }), "subtract 30 days");
+
+        std::cout << "  round-tripped " << checked << " day numbers\n";
+    }
+}
+
 int main()
 {
     std::cout << "CalcManager compact-build tests\n\n";
@@ -497,6 +765,9 @@ int main()
     TestMemory();
     TestHistory();
     TestOperatorNames();
+    TestConverter();
+    TestDateCalculation();
+    TestExactFixedPoint();
     TestRandom();
 
     std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";

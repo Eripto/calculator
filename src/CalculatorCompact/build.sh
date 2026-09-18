@@ -54,11 +54,11 @@ LIBS=(-lgdiplus -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -luuid -l
 echo "==> building engine ($ARCH)"
 SOURCES=()
 while IFS= read -r file; do
-  # pch.cpp is MSVC-only. UnitConverter needs the MSVC PPL task library, and it
-  # plus NumberFormattingUtils serve the converter modes only -- nothing on the
-  # Standard/Scientific/Programmer path references them.
+  # pch.cpp is MSVC-only; everything else in CalcManager is built, including the
+  # unit converter (CALC_SUPPORTS_CURRENCY_ASYNC is left undefined, which drops
+  # only the PPL-based live-currency fetch).
   case "$file" in
-    */pch.cpp|*/UnitConverter.cpp|*/NumberFormattingUtils.cpp) continue ;;
+    */pch.cpp) continue ;;
   esac
   SOURCES+=("$file")
 done < <(find "$ENGINE" -name '*.cpp' | sort)
@@ -71,8 +71,11 @@ for file in "${SOURCES[@]}"; do
 done
 
 echo "==> building front end"
-"$CXX" "${CXXFLAGS[@]}" -c "$ROOT/app/main.cpp" -o "$OBJ/main.o"
-OBJECTS+=("$OBJ/main.o")
+for file in "$ROOT"/app/*.cpp; do
+  name="$(basename "$file" .cpp).o"
+  "$CXX" "${CXXFLAGS[@]}" -c "$file" -o "$OBJ/$name"
+  OBJECTS+=("$OBJ/$name")
+done
 
 echo "==> compiling resources"
 "$WINDRES" -I"$ROOT/res" "$ROOT/res/app.rc" -O coff -o "$OBJ/app.res.o"
@@ -84,6 +87,8 @@ echo "==> linking"
 
 SIZE=$(stat -c %s "$OUT/Calculator.exe")
 printf '==> %s\n    %s bytes (%s KB)\n' "$OUT/Calculator.exe" "$SIZE" "$((SIZE / 1024))"
-if (( SIZE > 300 * 1024 )); then
-  echo "    WARNING: over the 300 KB budget" >&2
+BUDGET_KB="${CALC_SIZE_BUDGET_KB:-350}"
+if (( SIZE > BUDGET_KB * 1024 )); then
+  echo "    ERROR: over the ${BUDGET_KB} KB budget" >&2
+  exit 1
 fi

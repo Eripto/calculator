@@ -4,6 +4,7 @@
 #include <string>
 #include "Header Files/CCommand.h"
 #include "ExpressionCommand.h"
+#include "Header Files/NumericString.h"
 
 using namespace std;
 using namespace CalcEngine;
@@ -240,7 +241,7 @@ const wstring& COpndCommand::GetToken(wchar_t decimalSymbol)
         }
         else
         {
-            wstring num = to_wstring(nOpCode - IDC_0);
+            wstring num = CalcEngine::NumericString::FromInteger(nOpCode - IDC_0);
             m_token.append(num);
         }
     }

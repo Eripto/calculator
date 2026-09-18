@@ -20,7 +20,6 @@
 
 #include <array>
 #include <cstdlib>
-#include <cwchar>
 #include <string>
 #include "Header Files/CalcEngine.h"
 #include "Header Files/CalcUtils.h"
@@ -790,20 +789,17 @@ void CCalcEngine::ProcessCommandWorker(OpCode wParam)
         {
             CheckAndAddLastBinOpToHistory(); // rand is like entering the number
 
-            // Fixed-point with m_precision fraction digits. swprintf replaces the
-            // wstringstream this used to build: both produce the same correctly
-            // rounded expansion in the C locale, but the stream version links the
-            // whole iostream and locale machinery into every binary that uses the
-            // engine (~470KB with libstdc++).
-            wstring randomNumber(static_cast<size_t>(m_precision) + 8, L'\0');
-            const int written = swprintf(randomNumber.data(), randomNumber.size(), L"%.*f", m_precision, GenerateRandomNumber());
-            if (written > 0)
+            // Fixed-point with m_precision fraction digits, replacing the
+            // wstringstream this used to build -- that version linked the whole
+            // iostream and locale machinery into every binary using the engine.
+            // The generated value is always a multiple of 2^-53 in [0, 1), so the
+            // exact path below applies and reproduces every digit; FixedPoint is
+            // only a guard for values that path cannot represent.
+            const double randomValue = GenerateRandomNumber();
+            wstring randomNumber;
+            if (!CalcEngine::NumericString::TryExactFixedPointBelowOne(randomValue, m_precision, randomNumber))
             {
-                randomNumber.resize(static_cast<size_t>(written));
-            }
-            else
-            {
-                randomNumber = L"0";
+                randomNumber = CalcEngine::NumericString::FixedPoint(randomValue, m_precision);
             }
 
             auto rat = StringToRat(false, randomNumber, false, L"", m_radix, m_precision);
@@ -1010,20 +1006,21 @@ void CCalcEngine::DisplayAnnounceBinaryOperator()
 struct FunctionNameElement
 {
     // These hold resource ids (string literals from EngineStrings.h), never
-    // owned text, so wstring_view keeps the table below constant data instead of
-    // 78 heap-allocating string constructions at process start.
-    wstring_view degreeString;        // Used by default if there are no rad or grad specific strings.
-    wstring_view inverseDegreeString; // Will fall back to degreeString if empty
+    // owned text. Plain pointers rather than wstring_view or wstring: the table
+    // below is constant data either way, but this halves its size and drops the
+    // per-field relocations, which is worth a couple of KB across 35 entries.
+    const wchar_t* degreeString = L"";        // Used by default if there are no rad or grad specific strings.
+    const wchar_t* inverseDegreeString = L""; // Will fall back to degreeString if empty
 
-    wstring_view radString;
-    wstring_view inverseRadString; // Will fall back to radString if empty
+    const wchar_t* radString = L"";
+    const wchar_t* inverseRadString = L""; // Will fall back to radString if empty
 
-    wstring_view gradString;
-    wstring_view inverseGradString; // Will fall back to gradString if empty
+    const wchar_t* gradString = L"";
+    const wchar_t* inverseGradString = L""; // Will fall back to gradString if empty
 
-    wstring_view programmerModeString;
+    const wchar_t* programmerModeString = L"";
 
-    bool hasAngleStrings = ((!radString.empty()) || (!inverseRadString.empty()) || (!gradString.empty()) || (!inverseGradString.empty()));
+    bool hasAngleStrings = (*radString != L'\0') || (*inverseRadString != L'\0') || (*gradString != L'\0') || (*inverseGradString != L'\0');
 };
 
 struct OperatorStringEntry
@@ -1149,7 +1146,7 @@ wstring_view CCalcEngine::OpCodeToBinaryString(int nOpCode, bool isIntegerMode)
 
     if (const FunctionNameElement* entry = FindOperatorStrings(nOpCode); entry != nullptr)
     {
-        if (isIntegerMode && !entry->programmerModeString.empty())
+        if (isIntegerMode && *entry->programmerModeString != L'\0')
         {
             ids = entry->programmerModeString;
         }

@@ -26,14 +26,19 @@
 #include <vector>
 
 #include "CalculatorManager.h"
+#include "ConverterModel.h"
+#include "DateCalcModel.h"
+#include "ConverterData.generated.h"
 #include "CalculatorResource.h"
 #include "Command.h"
 #include "EngineStringTable.h"
 #include "Header Files/CalcEngine.h"
 #include "Header Files/EngineStrings.h"
+#include "Header Files/NumericString.h"
 #include "Header Files/RadixType.h"
 
 using namespace CalculationManager;
+using namespace CalcCompact;
 
 // libstdc++ funnels every internal error -- allocation failure, container
 // length and range violations -- through the five helpers below, which live in
@@ -51,6 +56,7 @@ namespace CalcCompact
     {
         const char* reason;
     };
+
 }
 
 namespace std
@@ -75,7 +81,17 @@ namespace std
         throw CalcCompact::StandardLibraryError{ reason };
     }
 
+    void __throw_out_of_range(const char* reason)
+    {
+        throw CalcCompact::StandardLibraryError{ reason };
+    }
+
     void __throw_out_of_range_fmt(const char* reason, ...)
+    {
+        throw CalcCompact::StandardLibraryError{ reason };
+    }
+
+    void __throw_invalid_argument(const char* reason)
     {
         throw CalcCompact::StandardLibraryError{ reason };
     }
@@ -320,7 +336,7 @@ namespace
             }
             for (const auto& entry : CalcCompact::kEngineStrings)
             {
-                if (entry.id == id)
+                if (id.compare(entry.id) == 0)
                 {
                     return std::wstring(entry.value);
                 }
@@ -359,7 +375,9 @@ namespace
     {
         Standard,
         Scientific,
-        Programmer
+        Programmer,
+        Date,
+        Converter
     };
 
     enum class Style
@@ -408,6 +426,16 @@ namespace
         ACT_RADIX_DEC,
         ACT_RADIX_OCT,
         ACT_RADIX_BIN,
+        ACT_MODE_DATE,
+        ACT_ALWAYS_ON_TOP,
+        ACT_SETTINGS,
+        ACT_CONV_FROM_UNIT,
+        ACT_CONV_TO_UNIT,
+        ACT_CONV_FIELD_FROM,
+        ACT_CONV_FIELD_TO,
+        ACT_DATE_MODE_DIFF,
+        ACT_DATE_MODE_OFFSET,
+        ACT_DATE_ADD_SUBTRACT,
         ACT_MEM_STORE,
         ACT_MEM_RECALL,
         ACT_MEM_ADD,
@@ -420,10 +448,22 @@ namespace
         ACT_MEM_ADD_BASE = 3400,   // + memory slot
         ACT_MEM_SUB_BASE = 3600,   // + memory slot
         ACT_HIST_ITEM_BASE = 3800, // + history row
+        ACT_CONV_CATEGORY_BASE = 4000, // + converter category id
+        ACT_CONV_UNIT_FROM_BASE = 4100, // + unit index
+        ACT_CONV_UNIT_TO_BASE = 4400, // + unit index
+        ACT_DATE_FIELD_BASE = 4700,  // + date field index
+        // Values chosen from a date picker. Encoded as
+        //   offsets: +which*1000 + value
+        //   month:   +3000 + dateIndex*100 + month
+        //   day:     +4000 + dateIndex*100 + day
+        //   year:    +5000 + dateIndex*200 + (year - m_dateYearBase[dateIndex])
+        ACT_DATE_VALUE_BASE = 10000,
     };
 
     static_assert(ACT_MEM_SUB < ACT_BIT_BASE, "scalar actions must stay below the ranged actions");
     static_assert(ACT_BIT_BASE + 64 <= ACT_MEM_LOAD_BASE, "bit indices must not reach the memory range");
+    static_assert(ACT_CONV_UNIT_FROM_BASE + 300 <= ACT_CONV_UNIT_TO_BASE, "unit lists must not overlap");
+    static_assert(ACT_DATE_VALUE_BASE + 16000 < kCommandBase, "date values must stay below the engine commands");
 
     struct Btn
     {
@@ -434,7 +474,8 @@ namespace
         bool icon = false;     // render with the Fluent icon font
         bool enabled = true;
         bool checked = false;
-        int textDip = 0;       // 0 = use the style default
+        bool leftAlign = false; // nav rows and list entries read left-to-right
+        int textDip = 0;        // 0 = use the style default
     };
 
     struct KeyDef
@@ -586,7 +627,7 @@ namespace
 
     struct MenuItem
     {
-        const wchar_t* label;
+        std::wstring_view label;
         int action;
     };
 
@@ -777,6 +818,12 @@ namespace
                 m_manager->SendCommand(m_wordSize);
                 ApplyRadix();
                 break;
+            case Mode::Date:
+                break;
+            case Mode::Converter:
+                EnsureConverter();
+                m_converterModel->SetCategory(m_converterCategory);
+                break;
             }
             if (mode != Mode::Programmer)
             {
@@ -785,7 +832,7 @@ namespace
             Relayout();
         }
 
-        const wchar_t* ModeName() const
+        std::wstring_view ModeName() const
         {
             switch (m_mode)
             {
@@ -793,9 +840,33 @@ namespace
                 return L"Scientific";
             case Mode::Programmer:
                 return L"Programmer";
+            case Mode::Date:
+                return L"Date Calculation";
+            case Mode::Converter:
+                return m_converterModel ? std::wstring_view(m_converterModel->CategoryName()) : std::wstring_view(L"Converter");
             default:
                 return L"Standard";
             }
+        }
+
+        void EnsureConverter()
+        {
+            if (!m_converterModel)
+            {
+                m_converterModel = std::make_unique<ConverterModel>();
+            }
+        }
+
+        void SetConverterCategory(int categoryId)
+        {
+            EnsureConverter();
+            m_converterCategory = categoryId;
+            m_mode = Mode::Converter;
+            m_converterModel->SetCategory(categoryId);
+            m_navOpen = false;
+            m_menuOpen = false;
+            m_panel = Panel::None;
+            Relayout();
         }
 
         void Invalidate()
@@ -906,6 +977,11 @@ namespace
         unsigned int m_openParens = 0;
 
         Mode m_mode = Mode::Standard;
+        std::unique_ptr<ConverterModel> m_converterModel;
+        DateCalcModel m_dateModel;
+        int m_converterCategory = 4; // Volume, the first converter category
+        bool m_alwaysOnTop = false;
+        bool m_settingsOpen = false;
         bool m_second = false;
         bool m_hyp = false;
         bool m_fe = false;
@@ -920,10 +996,25 @@ namespace
         bool m_menuOpen = false;
         std::vector<Btn> m_buttons;
         std::vector<Btn> m_menuButtons;
+        std::vector<MenuItem> m_menuItemStorage;
+        std::vector<std::wstring> m_menuLabelStorage;
+        RECT m_menuAnchor{};
+        int m_menuScroll = 0;
+        int m_menuContentHeight = 0;
         RECT m_menuRect{};
         RECT m_panelRect{};
         RECT m_displayRect{};
         RECT m_exprRect{};
+        struct NavGlyph
+        {
+            std::wstring_view glyph;
+            RECT rc;
+            bool isHeader;
+        };
+        std::vector<NavGlyph> m_navGlyphs;
+        int m_navContentHeight = 0;
+        int m_dateYearBase[3] = { 1970, 1970, 1970 };
+        int m_navScroll = 0;
         int m_hot = -1;
         int m_pressed = -1;
         int m_hotMenu = -1;
@@ -933,8 +1024,27 @@ namespace
 
         void BuildLayout(int width, int height);
 
+        // Geometry and text the converter and date painters need. The date
+        // segment labels are held here because Btn::label is a view.
+        std::wstring m_dateFieldText[16];
+        std::wstring_view m_dateCaptions[3];
+        RECT m_dateCaptionRects[3]{};
+        RECT m_convFromValue{};
+        RECT m_convToValue{};
+        RECT m_convSuggestions{};
+        RECT m_dateResultRect{};
+        RECT m_dateSecondaryRect{};
+
     private:
         void AddGrid(const KeyDef* keys, size_t count, int cols, int rows, RECT area);
+        void BuildConverterLayout(int contentRight, int height, int y);
+        void BuildDateLayout(int contentRight, int height, int y);
+        void BuildNavLayout(int width, int height);
+        void BuildSettingsLayout(int width, int height);
+
+    public:
+        void OpenDateFieldMenu(int fieldIndex);
+        void LayoutMenu();
     };
 
     CalcApp g_app;
@@ -1018,6 +1128,17 @@ namespace
         m_historyRects.clear();
         m_memoryRects.clear();
 
+        if (m_navOpen)
+        {
+            BuildNavLayout(width, height);
+            return;
+        }
+        if (m_settingsOpen)
+        {
+            BuildSettingsLayout(width, height);
+            return;
+        }
+
         const int pad = Dp(kPadDip);
         const int gap = Dp(kGapDip);
 
@@ -1039,17 +1160,45 @@ namespace
             menu.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
             m_buttons.push_back(menu);
 
-            Btn hist;
-            hist.label = L"";
-            hist.action = ACT_TOGGLE_PANEL;
-            hist.style = Style::Flat;
-            hist.icon = true;
-            hist.textDip = 15;
-            hist.checked = (m_panel != Panel::None);
-            hist.rc = { contentRight - Dp(44), pad + Dp(2), contentRight - Dp(4), pad + Dp(38) };
-            m_buttons.push_back(hist);
+            int right = contentRight - Dp(4);
+
+            const bool calculatorMode = (m_mode == Mode::Standard || m_mode == Mode::Scientific || m_mode == Mode::Programmer);
+            if (calculatorMode)
+            {
+                Btn hist;
+                hist.label = L"";
+                hist.action = ACT_TOGGLE_PANEL;
+                hist.style = Style::Flat;
+                hist.icon = true;
+                hist.textDip = 15;
+                hist.checked = (m_panel != Panel::None);
+                hist.rc = { right - Dp(40), pad + Dp(2), right, pad + Dp(38) };
+                m_buttons.push_back(hist);
+                right -= Dp(42);
+            }
+
+            Btn onTop;
+            onTop.label = m_alwaysOnTop ? L"" : L"";
+            onTop.action = ACT_ALWAYS_ON_TOP;
+            onTop.style = Style::Flat;
+            onTop.icon = true;
+            onTop.textDip = 14;
+            onTop.checked = m_alwaysOnTop;
+            onTop.rc = { right - Dp(40), pad + Dp(2), right, pad + Dp(38) };
+            m_buttons.push_back(onTop);
         }
         y += navH;
+
+        if (m_mode == Mode::Converter)
+        {
+            BuildConverterLayout(contentRight, height, y);
+            return;
+        }
+        if (m_mode == Mode::Date)
+        {
+            BuildDateLayout(contentRight, height, y);
+            return;
+        }
 
         // Display.
         m_exprRect = { pad, y, contentRight - Dp(12), y + Dp(kExprRowDip) };
@@ -1733,6 +1882,126 @@ namespace
         DeleteObject(clip);
     }
 
+
+    // Caption above a field, in the app's small secondary style.
+    void DrawCaption(HDC hdc, RECT rc, std::wstring_view text)
+    {
+        DrawLabel(hdc, rc, text, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_BOTTOM);
+    }
+
+    void PaintConverter(HDC hdc, CalcApp& app)
+    {
+        if (!app.m_converterModel)
+        {
+            return;
+        }
+        const auto& model = *app.m_converterModel;
+        const bool secondActive = model.IsSecondFieldActive();
+
+        // The field being edited is the brighter of the two, as in the app.
+        DrawAutoFitNumber(hdc, app.m_convFromValue, model.FromValue(), secondActive ? g_theme.secondaryText : g_theme.primaryText);
+        DrawAutoFitNumber(hdc, app.m_convToValue, model.ToValue(), secondActive ? g_theme.primaryText : g_theme.secondaryText);
+
+        const auto& suggestions = model.Suggestions();
+        if (suggestions.empty())
+        {
+            return;
+        }
+
+        RECT caption = app.m_convSuggestions;
+        caption.bottom = caption.top + Dp(16);
+        DrawLabel(hdc, caption, L"About equal to", 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+        // Two columns of "value abbreviation", as the shipping layout shows.
+        const int columnWidth = (app.m_convSuggestions.right - app.m_convSuggestions.left) / 2;
+        for (size_t i = 0; i < suggestions.size() && i < 4; ++i)
+        {
+            RECT cell;
+            cell.left = app.m_convSuggestions.left + static_cast<int>(i % 2) * columnWidth;
+            cell.right = cell.left + columnWidth - Dp(8);
+            cell.top = app.m_convSuggestions.top + Dp(18) + static_cast<int>(i / 2) * Dp(18);
+            cell.bottom = cell.top + Dp(18);
+
+            std::wstring text = suggestions[i].value;
+            text += L' ';
+            text += suggestions[i].abbreviation;
+            DrawLabel(hdc, cell, text, 12, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+    }
+
+    void PaintDate(HDC hdc, CalcApp& app)
+    {
+        const bool isDifference = app.m_dateModel.CurrentMode() == DateCalcModel::Mode::Difference;
+
+        // Captions sit just above each row of date segments.
+        for (const Btn& b : app.m_buttons)
+        {
+            if (b.action == ACT_DATE_FIELD_BASE + 0)
+            {
+                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
+                DrawCaption(hdc, caption, L"From");
+            }
+            else if (b.action == ACT_DATE_FIELD_BASE + 3)
+            {
+                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
+                DrawCaption(hdc, caption, L"To");
+            }
+            else if (b.action == ACT_DATE_FIELD_BASE + 6)
+            {
+                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
+                DrawCaption(hdc, caption, L"From");
+            }
+        }
+
+        if (isDifference)
+        {
+            const DateDifference difference = app.m_dateModel.Difference();
+
+            RECT caption = app.m_dateResultRect;
+            caption.top -= Dp(20);
+            caption.bottom = app.m_dateResultRect.top - Dp(2);
+            DrawCaption(hdc, caption, L"Difference");
+
+            DrawLabel(
+                hdc,
+                app.m_dateResultRect,
+                DateMath::DescribeDifference(difference),
+                20,
+                g_theme.primaryText,
+                false,
+                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
+                FW_SEMIBOLD,
+                1);
+
+            std::wstring total = CalcEngine::NumericString::FromInteger(difference.totalDays);
+            total += (difference.totalDays == 1) ? L" day" : L" days";
+            DrawLabel(hdc, app.m_dateSecondaryRect, total, 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        }
+        else
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                DrawCaption(hdc, app.m_dateCaptionRects[i], app.m_dateCaptions[i]);
+            }
+
+            RECT caption = app.m_dateResultRect;
+            caption.top -= Dp(20);
+            caption.bottom = app.m_dateResultRect.top - Dp(2);
+            DrawCaption(hdc, caption, L"Date");
+
+            DrawLabel(
+                hdc,
+                app.m_dateResultRect,
+                DateMath::FormatLong(app.m_dateModel.Result()),
+                20,
+                g_theme.primaryText,
+                false,
+                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
+                FW_SEMIBOLD,
+                1);
+        }
+    }
+
     void PaintApp(HDC hdc, int width, int height)
     {
         CalcApp& app = g_app;
@@ -1779,6 +2048,12 @@ namespace
             {
                 DrawLabel(hdc, b.rc, b.label, dip, color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             }
+            else if (b.leftAlign)
+            {
+                RECT text = b.rc;
+                text.left += Dp(44); // clear of the leading glyph
+                DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
             else
             {
                 DrawMixedLabel(hdc, b.rc, b.label, dip, color);
@@ -1791,6 +2066,58 @@ namespace
             DrawLabel(hdc, title, app.ModeName(), 15, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
         }
 
+        if (app.m_navOpen)
+        {
+            for (const auto& entry : app.m_navGlyphs)
+            {
+                if (entry.rc.right == 0 || entry.glyph.empty())
+                {
+                    continue;
+                }
+                RECT glyph = entry.rc;
+                glyph.left += Dp(10);
+                glyph.right = glyph.left + Dp(28);
+                DrawLabel(hdc, glyph, entry.glyph, 15, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            return;
+        }
+
+        if (app.m_settingsOpen)
+        {
+            RECT title{ Dp(14), Dp(50), width - Dp(14), Dp(84) };
+            DrawLabel(hdc, title, L"Settings", 22, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
+
+            RECT about{ Dp(14), Dp(160), width - Dp(14), Dp(200) };
+            DrawLabel(hdc, about, L"About", 16, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+
+            const wchar_t* lines[] = {
+                L"Calculator",
+                L"Version 1.0.0.0",
+                L"",
+                L"Built from the Windows Calculator engine",
+                L"(github.com/microsoft/calculator).",
+                L"Licensed under the MIT License.",
+            };
+            int y = Dp(200);
+            for (const wchar_t* line : lines)
+            {
+                RECT row{ Dp(14), y, width - Dp(14), y + Dp(22) };
+                DrawLabel(hdc, row, line, 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+                y += Dp(22);
+            }
+            return;
+        }
+
+        if (app.m_mode == Mode::Converter)
+        {
+            PaintConverter(hdc, app);
+        }
+        else if (app.m_mode == Mode::Date)
+        {
+            PaintDate(hdc, app);
+        }
+        else
+        {
         // Expression line, with the open-parenthesis count when one is pending.
         {
             if (app.m_openParens > 0)
@@ -1840,6 +2167,7 @@ namespace
                 }
             }
         }
+        } // calculator-mode display
 
         if (app.m_panel != Panel::None)
         {
@@ -1883,22 +2211,29 @@ namespace
 {
     // ------------------------------------------------------------ interaction
 
-    void OpenMenu(const MenuItem* items, size_t count, const RECT& anchor, bool isNav)
+    // Lays the open menu out from the stored items, clamped to the window and
+    // scrolled by m_menuScroll. Long lists (38 data units, 31 days, a century of
+    // years) are taller than the window, so they scroll rather than overflow.
+    void CalcApp::LayoutMenu()
     {
-        CalcApp& app = g_app;
-        app.m_menuButtons.clear();
-        app.m_hotMenu = -1;
+        m_menuButtons.clear();
 
         RECT client{};
-        GetClientRect(app.m_hwnd, &client);
+        GetClientRect(m_hwnd, &client);
 
-        const int itemH = Dp(34);
-        const int width = (std::max)(Dp(150), static_cast<int>(anchor.right - anchor.left));
-        const int height = static_cast<int>(count) * itemH + Dp(8);
+        const int itemHeight = Dp(34);
+        const int count = static_cast<int>(m_menuItemStorage.size());
+        const int width = (std::max)(Dp(170), static_cast<int>(m_menuAnchor.right - m_menuAnchor.left));
+        const int maxHeight = (client.bottom - client.top) - Dp(16);
+        const int wantedHeight = count * itemHeight + Dp(8);
+        const int height = (std::min)(wantedHeight, maxHeight);
+
+        m_menuContentHeight = (std::max)(0, wantedHeight - height);
+        m_menuScroll = (std::max)(0, (std::min)(m_menuScroll, m_menuContentHeight));
 
         RECT menu;
-        menu.left = anchor.left;
-        menu.top = anchor.bottom + Dp(2);
+        menu.left = m_menuAnchor.left;
+        menu.top = m_menuAnchor.bottom + Dp(2);
         menu.right = menu.left + width;
         menu.bottom = menu.top + height;
         if (menu.right > client.right - Dp(4))
@@ -1918,31 +2253,139 @@ namespace
             menu.top -= shift;
             menu.bottom -= shift;
         }
-        app.m_menuRect = menu;
-
-        for (size_t i = 0; i < count; ++i)
+        if (menu.top < Dp(4))
         {
+            menu.top = Dp(4);
+            menu.bottom = (std::min)(client.bottom - Dp(4), menu.top + height);
+        }
+        m_menuRect = menu;
+
+        for (int i = 0; i < count; ++i)
+        {
+            const int top = menu.top + Dp(4) + i * itemHeight - m_menuScroll;
+            if (top + itemHeight < menu.top || top > menu.bottom)
+            {
+                continue; // outside the visible strip
+            }
             Btn b;
-            b.label = items[i].label;
-            b.action = items[i].action;
+            b.label = m_menuItemStorage[static_cast<size_t>(i)].label;
+            b.action = m_menuItemStorage[static_cast<size_t>(i)].action;
             b.rc = { menu.left + Dp(4),
-                     menu.top + Dp(4) + static_cast<int>(i) * itemH,
+                     (std::max)(top, static_cast<int>(menu.top)),
                      menu.right - Dp(4),
-                     menu.top + Dp(4) + static_cast<int>(i + 1) * itemH };
-            app.m_menuButtons.push_back(b);
+                     (std::min)(top + itemHeight, static_cast<int>(menu.bottom)) };
+            if (b.rc.bottom - b.rc.top < Dp(10))
+            {
+                continue;
+            }
+            m_menuButtons.push_back(b);
+        }
+    }
+
+    void OpenMenu(const MenuItem* items, size_t count, const RECT& anchor)
+    {
+        CalcApp& app = g_app;
+        if (items != app.m_menuItemStorage.data())
+        {
+            app.m_menuItemStorage.assign(items, items + count);
+        }
+        app.m_menuAnchor = anchor;
+        app.m_menuScroll = 0;
+        app.m_hotMenu = -1;
+        app.LayoutMenu();
+        app.m_menuOpen = true;
+        app.Invalidate();
+    }
+
+    // Builds the month / day / year and offset pickers for Date Calculation.
+    void CalcApp::OpenDateFieldMenu(int fieldIndex)
+    {
+        m_menuLabelStorage.clear();
+        m_menuItemStorage.clear();
+
+        const auto pushNumbers = [this](int first, int last, int actionBase) {
+            for (int value = first; value <= last; ++value)
+            {
+                m_menuLabelStorage.push_back(CalcEngine::NumericString::FromInteger(value));
+                m_menuItemStorage.push_back({ std::wstring_view(), actionBase + value });
+            }
+        };
+
+        int selected = 0;
+        if (fieldIndex >= 10)
+        {
+            // Offset steppers: years, months and days, as the app allows 0-999.
+            const int which = fieldIndex - 10;
+            const int limit = (which == 0) ? 100 : (which == 1) ? 11 : 365;
+            pushNumbers(0, limit, ACT_DATE_VALUE_BASE + which * 1000);
+            selected = (which == 0) ? m_dateModel.OffsetYears() : (which == 1) ? m_dateModel.OffsetMonths() : m_dateModel.OffsetDays();
+        }
+        else
+        {
+            const int dateIndex = fieldIndex / 3;
+            const int segment = fieldIndex % 3;
+            CivilDate& date = (dateIndex == 0) ? m_dateModel.From() : (dateIndex == 1) ? m_dateModel.To() : m_dateModel.Start();
+
+            if (segment == 0)
+            {
+                for (int month = 1; month <= 12; ++month)
+                {
+                    m_menuLabelStorage.push_back(DateMath::MonthName(month));
+                    m_menuItemStorage.push_back({ std::wstring_view(), ACT_DATE_VALUE_BASE + 3000 + dateIndex * 100 + month });
+                }
+                selected = date.month - 1;
+            }
+            else if (segment == 1)
+            {
+                const int days = DateMath::DaysInMonth(date.year, date.month);
+                for (int day = 1; day <= days; ++day)
+                {
+                    m_menuLabelStorage.push_back(CalcEngine::NumericString::FromInteger(day));
+                    m_menuItemStorage.push_back({ std::wstring_view(), ACT_DATE_VALUE_BASE + 4000 + dateIndex * 100 + day });
+                }
+                selected = date.day - 1;
+            }
+            else
+            {
+                const int firstYear = date.year - 50;
+                for (int year = firstYear; year <= date.year + 50; ++year)
+                {
+                    m_menuLabelStorage.push_back(CalcEngine::NumericString::FromInteger(year));
+                    m_menuItemStorage.push_back({ std::wstring_view(), ACT_DATE_VALUE_BASE + 5000 + dateIndex * 200 + (year - firstYear) });
+                }
+                m_dateYearBase[dateIndex] = firstYear;
+                selected = 50;
+            }
         }
 
-        app.m_navOpen = isNav;
-        app.m_menuOpen = !isNav;
-        app.Invalidate();
+        for (size_t i = 0; i < m_menuItemStorage.size(); ++i)
+        {
+            m_menuItemStorage[i].label = m_menuLabelStorage[i];
+        }
+
+        RECT anchor{ 0, 0, 0, 0 };
+        for (const auto& b : m_buttons)
+        {
+            if (b.action == ACT_DATE_FIELD_BASE + fieldIndex)
+            {
+                anchor = b.rc;
+                break;
+            }
+        }
+        OpenMenu(m_menuItemStorage.data(), m_menuItemStorage.size(), anchor);
+
+        // Scroll the current value into view.
+        const int itemHeight = Dp(34);
+        m_menuScroll = (std::max)(0, selected * itemHeight - Dp(100));
+        LayoutMenu();
+        Invalidate();
     }
 
     void CloseMenus()
     {
         CalcApp& app = g_app;
-        if (app.m_navOpen || app.m_menuOpen)
+        if (app.m_menuOpen)
         {
-            app.m_navOpen = false;
             app.m_menuOpen = false;
             app.m_menuButtons.clear();
             app.Invalidate();
@@ -2043,17 +2486,109 @@ namespace
         app.Relayout();
     }
 
+    UnitConversionManager::Command ConverterCommandForCalcCommand(Command command);
+
     void Execute(int action)
     {
         CalcApp& app = g_app;
 
         if (action >= kCommandBase)
         {
-            app.Send(static_cast<Command>(action - kCommandBase));
+            const Command command = static_cast<Command>(action - kCommandBase);
+            if (app.m_mode == Mode::Converter)
+            {
+                app.EnsureConverter();
+                app.m_converterModel->Send(ConverterCommandForCalcCommand(command));
+                app.Relayout();
+                return;
+            }
+            app.Send(command);
             app.Relayout();
             return;
         }
 
+        if (action >= ACT_DATE_VALUE_BASE)
+        {
+            int value = action - ACT_DATE_VALUE_BASE;
+            const auto dateAt = [&app](int index) -> CivilDate& {
+                return (index == 0) ? app.m_dateModel.From() : (index == 1) ? app.m_dateModel.To() : app.m_dateModel.Start();
+            };
+
+            if (value >= 5000)
+            {
+                value -= 5000;
+                const int dateIndex = value / 200;
+                CivilDate& date = dateAt(dateIndex);
+                date.year = app.m_dateYearBase[dateIndex] + (value % 200);
+                date.day = (std::min)(date.day, DateMath::DaysInMonth(date.year, date.month));
+            }
+            else if (value >= 4000)
+            {
+                value -= 4000;
+                dateAt(value / 100).day = value % 100;
+            }
+            else if (value >= 3000)
+            {
+                value -= 3000;
+                const int dateIndex = value / 100;
+                CivilDate& date = dateAt(dateIndex);
+                date.month = value % 100;
+                date.day = (std::min)(date.day, DateMath::DaysInMonth(date.year, date.month));
+            }
+            else
+            {
+                const int which = value / 1000;
+                const int amount = value % 1000;
+                if (which == 0)
+                {
+                    app.m_dateModel.OffsetYears() = amount;
+                }
+                else if (which == 1)
+                {
+                    app.m_dateModel.OffsetMonths() = amount;
+                }
+                else
+                {
+                    app.m_dateModel.OffsetDays() = amount;
+                }
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_DATE_FIELD_BASE)
+        {
+            app.OpenDateFieldMenu(action - ACT_DATE_FIELD_BASE);
+            return;
+        }
+        if (action >= ACT_CONV_UNIT_TO_BASE)
+        {
+            app.EnsureConverter();
+            const auto& units = app.m_converterModel->Units();
+            const size_t index = static_cast<size_t>(action - ACT_CONV_UNIT_TO_BASE);
+            if (index < units.size())
+            {
+                app.m_converterModel->SetUnits(app.m_converterModel->FromUnitId(), units[index].id);
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_CONV_UNIT_FROM_BASE)
+        {
+            app.EnsureConverter();
+            const auto& units = app.m_converterModel->Units();
+            const size_t index = static_cast<size_t>(action - ACT_CONV_UNIT_FROM_BASE);
+            if (index < units.size())
+            {
+                app.m_converterModel->SetUnits(units[index].id, app.m_converterModel->ToUnitId());
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_CONV_CATEGORY_BASE)
+        {
+            app.SetConverterCategory(action - ACT_CONV_CATEGORY_BASE);
+            return;
+        }
         if (action >= ACT_HIST_ITEM_BASE)
         {
             LoadHistoryItem(static_cast<size_t>(action - ACT_HIST_ITEM_BASE));
@@ -2098,23 +2633,76 @@ namespace
         switch (action)
         {
         case ACT_NAV_MENU:
+            app.m_navOpen = !app.m_navOpen;
+            app.m_settingsOpen = false;
+            app.m_navScroll = 0;
+            app.Relayout();
+            break;
+        case ACT_SETTINGS:
+            app.m_settingsOpen = !app.m_settingsOpen;
+            app.m_navOpen = false;
+            app.Relayout();
+            break;
+        case ACT_ALWAYS_ON_TOP:
+            app.m_alwaysOnTop = !app.m_alwaysOnTop;
+            SetWindowPos(app.m_hwnd, app.m_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            app.Relayout();
+            break;
+        case ACT_MODE_DATE:
+            app.SetMode(Mode::Date);
+            break;
+        case ACT_CONV_FIELD_FROM:
+            app.EnsureConverter();
+            app.m_converterModel->SetActiveField(false);
+            app.Relayout();
+            break;
+        case ACT_CONV_FIELD_TO:
+            app.EnsureConverter();
+            app.m_converterModel->SetActiveField(true);
+            app.Relayout();
+            break;
+        case ACT_CONV_FROM_UNIT:
+        case ACT_CONV_TO_UNIT:
         {
-            static const MenuItem modes[] = {
-                { L"Standard", ACT_MODE_STANDARD },
-                { L"Scientific", ACT_MODE_SCIENTIFIC },
-                { L"Programmer", ACT_MODE_PROGRAMMER },
-            };
-            RECT anchor = app.m_buttons.empty() ? RECT{ 0, 0, Dp(170), Dp(40) } : app.m_buttons[0].rc;
-            anchor.right = anchor.left + Dp(170);
-            OpenMenu(modes, ARRAYSIZE(modes), anchor, true);
-            for (auto& b : app.m_menuButtons)
+            app.EnsureConverter();
+            const bool fromSide = (action == ACT_CONV_FROM_UNIT);
+            const auto& units = app.m_converterModel->Units();
+            app.m_menuItemStorage.clear();
+            app.m_menuItemStorage.reserve(units.size());
+            for (size_t i = 0; i < units.size(); ++i)
             {
-                b.checked = (b.action == ACT_MODE_STANDARD && app.m_mode == Mode::Standard)
-                    || (b.action == ACT_MODE_SCIENTIFIC && app.m_mode == Mode::Scientific)
-                    || (b.action == ACT_MODE_PROGRAMMER && app.m_mode == Mode::Programmer);
+                app.m_menuItemStorage.push_back(
+                    { units[i].name, static_cast<int>((fromSide ? ACT_CONV_UNIT_FROM_BASE : ACT_CONV_UNIT_TO_BASE) + i) });
+            }
+            RECT anchor{ 0, 0, 0, 0 };
+            for (const auto& b : app.m_buttons)
+            {
+                if (b.action == action)
+                {
+                    anchor = b.rc;
+                    break;
+                }
+            }
+            OpenMenu(app.m_menuItemStorage.data(), app.m_menuItemStorage.size(), anchor);
+            const int currentId = fromSide ? app.m_converterModel->FromUnitId() : app.m_converterModel->ToUnitId();
+            for (size_t i = 0; i < app.m_menuButtons.size() && i < units.size(); ++i)
+            {
+                app.m_menuButtons[i].checked = (units[i].id == currentId);
             }
             break;
         }
+        case ACT_DATE_MODE_DIFF:
+            app.m_dateModel.SetMode(DateCalcModel::Mode::Difference);
+            app.Relayout();
+            break;
+        case ACT_DATE_MODE_OFFSET:
+            app.m_dateModel.SetMode(DateCalcModel::Mode::AddSubtract);
+            app.Relayout();
+            break;
+        case ACT_DATE_ADD_SUBTRACT:
+            app.m_dateModel.SetAdding(!app.m_dateModel.IsAdding());
+            app.Relayout();
+            break;
         case ACT_MODE_STANDARD:
             app.SetMode(Mode::Standard);
             break;
@@ -2205,7 +2793,7 @@ namespace
                     break;
                 }
             }
-            OpenMenu(items, 6, anchor, false);
+            OpenMenu(items, 6, anchor);
             break;
         }
         case ACT_FUNC_MENU:
@@ -2219,7 +2807,7 @@ namespace
                     break;
                 }
             }
-            OpenMenu(kFuncMenu, ARRAYSIZE(kFuncMenu), anchor, false);
+            OpenMenu(kFuncMenu, ARRAYSIZE(kFuncMenu), anchor);
             break;
         }
         case ACT_BITWISE_MENU:
@@ -2236,11 +2824,11 @@ namespace
             }
             if (action == ACT_BITWISE_MENU)
             {
-                OpenMenu(kBitwiseMenu, ARRAYSIZE(kBitwiseMenu), anchor, false);
+                OpenMenu(kBitwiseMenu, ARRAYSIZE(kBitwiseMenu), anchor);
             }
             else
             {
-                OpenMenu(kShiftMenu, ARRAYSIZE(kShiftMenu), anchor, false);
+                OpenMenu(kShiftMenu, ARRAYSIZE(kShiftMenu), anchor);
             }
             break;
         }
@@ -2266,6 +2854,30 @@ namespace
             break;
         default:
             break;
+        }
+    }
+
+    UnitConversionManager::Command ConverterCommandForCalcCommand(Command command)
+    {
+        using UnitConversionManager::Command;
+        const int code = static_cast<int>(command);
+        if (code >= static_cast<int>(CalculationManager::Command::Command0) && code <= static_cast<int>(CalculationManager::Command::Command9))
+        {
+            return static_cast<Command>(static_cast<int>(Command::Zero) + (code - static_cast<int>(CalculationManager::Command::Command0)));
+        }
+        switch (command)
+        {
+        case CalculationManager::Command::CommandPNT:
+            return Command::Decimal;
+        case CalculationManager::Command::CommandSIGN:
+            return Command::Negate;
+        case CalculationManager::Command::CommandBACK:
+            return Command::Backspace;
+        case CalculationManager::Command::CommandCENTR:
+        case CalculationManager::Command::CommandCLEAR:
+            return Command::Clear;
+        default:
+            return Command::None;
         }
     }
 
@@ -2522,7 +3134,7 @@ namespace
 
             int hotMenu = -1;
             int hot = -1;
-            if (app.m_navOpen || app.m_menuOpen)
+            if (app.m_menuOpen)
             {
                 hotMenu = HitTest(app.m_menuButtons, pt);
             }
@@ -2549,7 +3161,7 @@ namespace
         {
             SetFocus(hwnd);
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            if (app.m_navOpen || app.m_menuOpen)
+            if (app.m_menuOpen)
             {
                 const int index = HitTest(app.m_menuButtons, pt);
                 if (index < 0)
@@ -2584,12 +3196,26 @@ namespace
         }
 
         case WM_MOUSEWHEEL:
-            if (app.m_panel != Panel::None)
+        {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wParam) / 2;
+            if (app.m_menuOpen)
             {
-                app.m_historyScroll -= GET_WHEEL_DELTA_WPARAM(wParam) / 2;
+                app.m_menuScroll -= delta;
+                app.LayoutMenu();
+                app.Invalidate();
+            }
+            else if (app.m_navOpen)
+            {
+                app.m_navScroll = (std::max)(0, app.m_navScroll - delta);
+                app.Relayout();
+            }
+            else if (app.m_panel != Panel::None)
+            {
+                app.m_historyScroll -= delta;
                 app.Relayout();
             }
             return 0;
+        }
 
         case WM_TIMER:
             if (wParam == 1)
@@ -2601,7 +3227,7 @@ namespace
             return 0;
 
         case WM_CHAR:
-            if (!app.m_navOpen && !app.m_menuOpen)
+            if (!app.m_navOpen && !app.m_menuOpen && !app.m_settingsOpen)
             {
                 RunAction(hwnd, ActionForChar(static_cast<wchar_t>(wParam)));
             }
@@ -2620,9 +3246,16 @@ namespace
 
         case WM_KEYDOWN:
         {
-            if (wParam == VK_ESCAPE && (app.m_navOpen || app.m_menuOpen))
+            if (wParam == VK_ESCAPE && app.m_menuOpen)
             {
                 CloseMenus();
+                return 0;
+            }
+            if (wParam == VK_ESCAPE && (app.m_navOpen || app.m_settingsOpen))
+            {
+                app.m_navOpen = false;
+                app.m_settingsOpen = false;
+                app.Relayout();
                 return 0;
             }
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -2733,4 +3366,323 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     ClearFontCache();
     Gdiplus::GdiplusShutdown(gdiplusToken);
     return static_cast<int>(message.wParam);
+}
+
+namespace
+{
+    // ------------------------------------------------- converter / date layout
+
+    void CalcApp::BuildConverterLayout(int contentRight, int height, int y)
+    {
+        EnsureConverter();
+        const int pad = Dp(kPadDip);
+        const int gap = Dp(kGapDip);
+
+        // Two readouts, each a large value with the unit picker beneath it.
+        for (int field = 0; field < 2; ++field)
+        {
+            const bool isFrom = (field == 0);
+            RECT value{ pad + Dp(10), y, contentRight - Dp(14), y + Dp(48) };
+            (isFrom ? m_convFromValue : m_convToValue) = value;
+
+            Btn hit;
+            hit.action = isFrom ? ACT_CONV_FIELD_FROM : ACT_CONV_FIELD_TO;
+            hit.style = Style::Bit; // hover-only fill
+            hit.rc = value;
+            m_buttons.push_back(hit);
+            y += Dp(48);
+
+            Btn unit;
+            unit.label = isFrom ? std::wstring_view(m_converterModel->FromUnitName()) : std::wstring_view(m_converterModel->ToUnitName());
+            unit.action = isFrom ? ACT_CONV_FROM_UNIT : ACT_CONV_TO_UNIT;
+            unit.style = Style::Flat;
+            unit.textDip = 13;
+            unit.checked = (m_converterModel->IsSecondFieldActive() != isFrom);
+            unit.rc = { pad + Dp(8), y, (std::min)(contentRight - Dp(8), pad + Dp(260)), y + Dp(30) };
+            m_buttons.push_back(unit);
+            y += Dp(38);
+        }
+
+        // "About equal to" block.
+        m_convSuggestions = { pad + Dp(10), y, contentRight - Dp(10), y + Dp(54) };
+        if (!m_converterModel->Suggestions().empty())
+        {
+            y += Dp(58);
+        }
+
+        // Keypad: a clear/backspace row above the digit grid, as the shipping
+        // converter lays it out.
+        RECT keypad{ pad, y, contentRight - pad, height - pad };
+        if (keypad.bottom < keypad.top + Dp(80))
+        {
+            keypad.top = (std::max)(y, static_cast<int>(keypad.bottom) - Dp(80));
+        }
+
+        const int rows = 5;
+        const int rowHeight = (keypad.bottom - keypad.top) / rows;
+        const int usable = keypad.right - keypad.left;
+
+        Btn clearEntry;
+        clearEntry.label = L"CE";
+        clearEntry.action = Cmd(Command::CommandCENTR);
+        clearEntry.style = Style::Operator;
+        clearEntry.rc = { keypad.left + gap, keypad.top + gap, keypad.left + usable / 2 - gap, keypad.top + rowHeight - gap };
+        m_buttons.push_back(clearEntry);
+
+        Btn back;
+        back.label = L"";
+        back.action = Cmd(Command::CommandBACK);
+        back.style = Style::Operator;
+        back.icon = true;
+        back.rc = { keypad.left + usable / 2 + gap, keypad.top + gap, keypad.right - gap, keypad.top + rowHeight - gap };
+        m_buttons.push_back(back);
+
+        static constexpr KeyDef digits[] = {
+            { L"7", Cmd(Command::Command7), Style::Number, false, 0 },
+            { L"8", Cmd(Command::Command8), Style::Number, false, 0 },
+            { L"9", Cmd(Command::Command9), Style::Number, false, 0 },
+            { L"4", Cmd(Command::Command4), Style::Number, false, 0 },
+            { L"5", Cmd(Command::Command5), Style::Number, false, 0 },
+            { L"6", Cmd(Command::Command6), Style::Number, false, 0 },
+            { L"1", Cmd(Command::Command1), Style::Number, false, 0 },
+            { L"2", Cmd(Command::Command2), Style::Number, false, 0 },
+            { L"3", Cmd(Command::Command3), Style::Number, false, 0 },
+            { L"+/−", Cmd(Command::CommandSIGN), Style::Number, false, 0 },
+            { L"0", Cmd(Command::Command0), Style::Number, false, 0 },
+            { L".", Cmd(Command::CommandPNT), Style::Number, false, 0 },
+        };
+
+        RECT grid{ keypad.left, keypad.top + rowHeight, keypad.right, keypad.bottom };
+        const size_t firstDigit = m_buttons.size();
+        AddGrid(digits, ARRAYSIZE(digits), 3, 4, grid);
+        // Negation only applies where the category allows it.
+        if (!m_converterModel->SupportsNegative())
+        {
+            for (size_t i = firstDigit; i < m_buttons.size(); ++i)
+            {
+                if (m_buttons[i].action == Cmd(Command::CommandSIGN))
+                {
+                    m_buttons[i].enabled = false;
+                }
+            }
+        }
+    }
+
+    void CalcApp::BuildDateLayout(int contentRight, int height, int y)
+    {
+        const int pad = Dp(kPadDip);
+        const bool isDifference = m_dateModel.CurrentMode() == DateCalcModel::Mode::Difference;
+
+        // Mode picker.
+        Btn modeButton;
+        modeButton.label = isDifference ? L"Difference between dates " : L"Add or subtract days ";
+        modeButton.action = isDifference ? ACT_DATE_MODE_OFFSET : ACT_DATE_MODE_DIFF;
+        modeButton.style = Style::Flat;
+        modeButton.textDip = 13;
+        modeButton.rc = { pad + Dp(10), y + Dp(4), contentRight - Dp(10), y + Dp(38) };
+        m_buttons.push_back(modeButton);
+        y += Dp(48);
+
+        // One row of three segments (month / day / year) per date.
+        const auto addDateRow = [&](CivilDate& date, int dateIndex) {
+            const int usable = contentRight - pad * 2 - Dp(16);
+            const int widths[3] = { usable * 45 / 100, usable * 22 / 100, usable * 33 / 100 };
+            int x = pad + Dp(10);
+            for (int segment = 0; segment < 3; ++segment)
+            {
+                Btn field;
+                field.action = ACT_DATE_FIELD_BASE + dateIndex * 3 + segment;
+                field.style = Style::Flat;
+                field.checked = true; // always shows its box, like a picker
+                field.textDip = 13;
+                if (segment == 0)
+                {
+                    field.label = DateMath::MonthName(date.month);
+                }
+                else
+                {
+                    m_dateFieldText[dateIndex * 3 + segment] =
+                        CalcEngine::NumericString::FromInteger(segment == 1 ? date.day : date.year);
+                    field.label = m_dateFieldText[dateIndex * 3 + segment];
+                }
+                field.rc = { x + Dp(2), y, x + widths[segment] - Dp(2), y + Dp(34) };
+                m_buttons.push_back(field);
+                x += widths[segment];
+            }
+            y += Dp(44);
+        };
+
+        if (isDifference)
+        {
+            y += Dp(18); // room for the "From" caption
+            addDateRow(m_dateModel.From(), 0);
+            y += Dp(18); // "To"
+            addDateRow(m_dateModel.To(), 1);
+            m_dateResultRect = { pad + Dp(10), y + Dp(22), contentRight - Dp(10), y + Dp(58) };
+            m_dateSecondaryRect = { pad + Dp(10), y + Dp(60), contentRight - Dp(10), y + Dp(86) };
+        }
+        else
+        {
+            y += Dp(18); // "From"
+            addDateRow(m_dateModel.Start(), 2);
+
+            Btn addSubtract;
+            addSubtract.label = m_dateModel.IsAdding() ? L"Add " : L"Subtract ";
+            addSubtract.action = ACT_DATE_ADD_SUBTRACT;
+            addSubtract.style = Style::Flat;
+            addSubtract.checked = true;
+            addSubtract.textDip = 13;
+            addSubtract.rc = { pad + Dp(10), y + Dp(4), contentRight - Dp(10), y + Dp(38) };
+            m_buttons.push_back(addSubtract);
+            y += Dp(48);
+
+            // Years / months / days steppers.
+            const wchar_t* captions[3] = { L"Years", L"Months", L"Days" };
+            const int values[3] = { m_dateModel.OffsetYears(), m_dateModel.OffsetMonths(), m_dateModel.OffsetDays() };
+            const int usable = contentRight - pad * 2 - Dp(16);
+            int x = pad + Dp(10);
+            for (int i = 0; i < 3; ++i)
+            {
+                m_dateFieldText[10 + i] = CalcEngine::NumericString::FromInteger(values[i]);
+                Btn stepper;
+                stepper.label = m_dateFieldText[10 + i];
+                stepper.action = ACT_DATE_FIELD_BASE + 10 + i;
+                stepper.style = Style::Flat;
+                stepper.checked = true;
+                stepper.textDip = 13;
+                stepper.rc = { x + Dp(2), y + Dp(18), x + usable / 3 - Dp(2), y + Dp(52) };
+                m_buttons.push_back(stepper);
+                m_dateCaptions[i] = captions[i];
+                m_dateCaptionRects[i] = { x + Dp(4), y, x + usable / 3, y + Dp(18) };
+                x += usable / 3;
+            }
+            y += Dp(62);
+
+            m_dateResultRect = { pad + Dp(10), y + Dp(22), contentRight - Dp(10), y + Dp(58) };
+            m_dateSecondaryRect = { 0, 0, 0, 0 };
+        }
+    }
+}
+
+namespace
+{
+    // ------------------------------------------------------ navigation pane
+
+    // The nav pane lists the same entries, in the same two groups and the same
+    // order, as the shipping app's NavCategory manifest.
+    struct NavEntry
+    {
+        std::wstring_view label;
+        std::wstring_view glyph;
+        int action;
+        bool isHeader;
+    };
+
+    constexpr NavEntry kCalculatorNav[] = {
+        { L"Calculator", L"", ACT_NONE, true },
+        { L"Standard", L"", ACT_MODE_STANDARD, false },
+        { L"Scientific", L"", ACT_MODE_SCIENTIFIC, false },
+        { L"Programmer", L"", ACT_MODE_PROGRAMMER, false },
+        { L"Date Calculation", L"", ACT_MODE_DATE, false },
+    };
+
+    void CalcApp::BuildNavLayout(int width, int height)
+    {
+        const int pad = Dp(kPadDip);
+        const int rowHeight = Dp(38);
+
+        Btn close;
+        close.label = L"";
+        close.action = ACT_NAV_MENU;
+        close.style = Style::Flat;
+        close.icon = true;
+        close.textDip = 14;
+        close.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
+        m_buttons.push_back(close);
+
+        const int listTop = Dp(kNavRowDip);
+        const int listBottom = height - Dp(52);
+        int y = listTop - m_navScroll;
+
+        const auto addRow = [&](std::wstring_view label, std::wstring_view glyph, int action, bool header, bool current) {
+            // Only rows that fit entirely between the header and the Settings
+            // entry are built, so nothing can spill over either.
+            if (y >= listTop && y + rowHeight <= listBottom)
+            {
+                Btn row;
+                row.label = label;
+                row.action = header ? ACT_NONE : action;
+                row.style = header ? Style::Bit : Style::Flat;
+                row.enabled = !header;
+                row.checked = current;
+                row.textDip = header ? 12 : 14;
+                row.leftAlign = true;
+                row.rc = { pad + Dp(8), y, width - Dp(8), y + rowHeight - Dp(2) };
+                m_navGlyphs.push_back({ glyph, row.rc, header });
+                m_buttons.push_back(row);
+            }
+            else
+            {
+                m_navGlyphs.push_back({ glyph, RECT{ 0, 0, 0, 0 }, header });
+            }
+            y += header ? rowHeight - Dp(6) : rowHeight;
+        };
+
+        m_navGlyphs.clear();
+
+        for (const NavEntry& entry : kCalculatorNav)
+        {
+            const bool current = !entry.isHeader && m_mode != Mode::Converter
+                && ((entry.action == ACT_MODE_STANDARD && m_mode == Mode::Standard)
+                    || (entry.action == ACT_MODE_SCIENTIFIC && m_mode == Mode::Scientific)
+                    || (entry.action == ACT_MODE_PROGRAMMER && m_mode == Mode::Programmer)
+                    || (entry.action == ACT_MODE_DATE && m_mode == Mode::Date));
+            addRow(entry.label, entry.glyph, entry.action, entry.isHeader, current);
+        }
+
+        addRow(L"Converter", L"", ACT_NONE, true, false);
+        for (const auto& category : kConverterCategories)
+        {
+            const bool current = (m_mode == Mode::Converter) && (m_converterCategory == category.id);
+            addRow(category.name, category.glyph, ACT_CONV_CATEGORY_BASE + category.id, false, current);
+        }
+
+        m_navContentHeight = (y + m_navScroll) - listTop;
+
+        Btn settings;
+        settings.label = L"Settings";
+        settings.action = ACT_SETTINGS;
+        settings.style = Style::Flat;
+        settings.textDip = 14;
+        settings.leftAlign = true;
+        settings.rc = { pad + Dp(8), height - Dp(44), width - Dp(8), height - Dp(8) };
+        m_navGlyphs.push_back({ L"", settings.rc, false });
+        m_buttons.push_back(settings);
+    }
+
+    void CalcApp::BuildSettingsLayout(int width, int height)
+    {
+        const int pad = Dp(kPadDip);
+
+        Btn back;
+        back.label = L"";
+        back.action = ACT_SETTINGS;
+        back.style = Style::Flat;
+        back.icon = true;
+        back.textDip = 14;
+        back.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
+        m_buttons.push_back(back);
+
+        Btn onTop;
+        onTop.label = m_alwaysOnTop ? L"Always on top: On" : L"Always on top: Off";
+        onTop.action = ACT_ALWAYS_ON_TOP;
+        onTop.style = Style::Flat;
+        onTop.checked = m_alwaysOnTop;
+        onTop.textDip = 14;
+        onTop.leftAlign = true;
+        onTop.rc = { pad + Dp(12), Dp(96), width - Dp(12), Dp(136) };
+        m_buttons.push_back(onTop);
+
+        m_navContentHeight = height;
+    }
 }

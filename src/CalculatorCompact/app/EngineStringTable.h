@@ -7,14 +7,15 @@
 #pragma once
 
 #include <array>
-#include <string_view>
 
 namespace CalcCompact
 {
+    // Plain pointers rather than string views: the table is scanned once per
+    // lookup either way, and this halves both its size and its relocations.
     struct EngineString
     {
-        std::wstring_view id;
-        std::wstring_view value;
+        const wchar_t* id;
+        const wchar_t* value;
     };
 
     inline constexpr std::array<EngineString, 151> kEngineStrings = {{
