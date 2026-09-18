@@ -200,6 +200,9 @@ namespace
 
     Theme g_theme{};
 
+    // 0 follows the system, 1 forces light, 2 forces dark. Set from Settings.
+    int g_themeOverride = 0;
+
     COLORREF Mix(COLORREF a, COLORREF b, double t)
     {
         auto lerp = [t](int x, int y) { return static_cast<int>(x + (y - x) * t + 0.5); };
@@ -244,7 +247,7 @@ namespace
 
     void LoadTheme()
     {
-        const bool dark = SystemUsesDarkTheme();
+        const bool dark = (g_themeOverride == 0) ? SystemUsesDarkTheme() : (g_themeOverride == 2);
         const COLORREF accent = SystemAccent();
         Theme t{};
         t.dark = dark;
@@ -491,6 +494,7 @@ namespace
         Accent,     // the equals key
         Flat,       // chrome: nav, memory strip, panel commands
         Toggle,     // flat, but drawn "checked" when active
+        Card,       // settings surface: filled, outlined, larger radius
         Bit         // programmer bit-flip cell
     };
 
@@ -532,6 +536,7 @@ namespace
         ACT_RADIX_BIN,
         ACT_MODE_DATE,
         ACT_ALWAYS_ON_TOP,
+        ACT_APP_THEME,
         ACT_SETTINGS,
         ACT_CONV_FROM_UNIT,
         ACT_CONV_TO_UNIT,
@@ -562,6 +567,9 @@ namespace
         //   day:     +4000 + dateIndex*100 + day
         //   year:    +5000 + dateIndex*200 + (year - m_dateYearBase[dateIndex])
         ACT_DATE_VALUE_BASE = 10000,
+        ACT_CAL_PREV = 20000,
+        ACT_CAL_NEXT,
+        ACT_CAL_DAY_BASE = 20100, // + day of month
     };
 
     static_assert(ACT_MEM_SUB < ACT_BIT_BASE, "scalar actions must stay below the ranged actions");
@@ -578,7 +586,9 @@ namespace
         bool icon = false;     // render with the Fluent icon font
         bool enabled = true;
         bool checked = false;
-        bool leftAlign = false; // nav rows and list entries read left-to-right
+        bool leftAlign = false;  // nav rows and list entries read left-to-right
+        bool dateField = false;  // draws a trailing calendar glyph and a rule
+        bool combo = false;      // combo box: leading text, trailing chevron
         int textDip = 0;        // 0 = use the style default
     };
 
@@ -693,8 +703,8 @@ namespace
     // Programmer: 5 columns x 6 rows, with the hex digits in the first column.
     constexpr KeyDef kProgrammerKeys[] = {
         { L"A", Cmd(Command::CommandA), Style::Number, false, 0 },
-        { L"<<", Cmd(Command::CommandLSHF), Style::Operator, false, 0 },
-        { L">>", Cmd(Command::CommandRSHF), Style::Operator, false, 0 },
+        { L"«", Cmd(Command::CommandLSHF), Style::Operator, false, 20 },
+        { L"»", Cmd(Command::CommandRSHF), Style::Operator, false, 20 },
         { L"C",  Cmd(Command::CommandCLEAR), Style::Operator, false, 0 },
         { L"", Cmd(Command::CommandBACK), Style::Operator, true, 0 },
 
@@ -794,8 +804,11 @@ namespace
     constexpr int kResultRowDip = 62;
     constexpr int kStripRowDip = 32;
     constexpr int kMemRowDip = 34;
-    constexpr int kGapDip = 2;
-    constexpr int kPadDip = 2;
+    // The shipping app leaves roughly 6px between keys and the same again around
+    // the keypad, rather than running it to the window edge. AddGrid insets each
+    // cell by kGapDip on every side, so adjacent keys end up 2 * kGapDip apart.
+    constexpr int kGapDip = 3;
+    constexpr int kPadDip = 3;
     constexpr int kRadiusDip = 4;
     constexpr int kPanelWidthDip = 300;
     constexpr int kDockThresholdDip = 640;
@@ -952,7 +965,7 @@ namespace
             case Mode::Programmer:
                 return L"Programmer";
             case Mode::Date:
-                return L"Date Calculation";
+                return L"Date calculation";
             case Mode::Converter:
                 return m_converterModel ? std::wstring_view(m_converterModel->CategoryName()) : std::wstring_view(L"Converter");
             default:
@@ -1171,6 +1184,7 @@ namespace
         DateCalcModel m_dateModel;
         int m_converterCategory = 4; // Volume, the first converter category
         bool m_alwaysOnTop = false;
+        int m_themeChoice = 0; // 0 system, 1 light, 2 dark
         bool m_settingsOpen = false;
         bool m_second = false;
         bool m_hyp = false;
@@ -1219,6 +1233,10 @@ namespace
         std::vector<NavGlyph> m_navGlyphs;
         int m_navContentHeight = 0;
         int m_dateYearBase[3] = { 1970, 1970, 1970 };
+        // The date picker reuses the flyout surface, laid out as a month grid.
+        bool m_menuIsCalendar = false;
+        CivilDate m_calendarMonth;
+        int m_calendarField = 0;
         int m_navScroll = 0;
         int m_hot = -1;
         int m_pressed = -1;
@@ -1276,7 +1294,14 @@ namespace
 
     public:
         void OpenDateFieldMenu(int fieldIndex);
+        void OpenCalendar(int dateIndex);
+        void LayoutCalendar();
         void LayoutMenu();
+
+        CivilDate& DateForIndex(int index)
+        {
+            return (index == 0) ? m_dateModel.From() : (index == 1) ? m_dateModel.To() : m_dateModel.Start();
+        }
     };
 
     CalcApp g_app;
@@ -1453,23 +1478,22 @@ namespace
             // Programmer radix readouts.
             if (m_mode == Mode::Programmer)
             {
-                const int rowH = Dp(23);
+                // The readouts are plain rows: the active radix is marked by a short
+                // accent bar at the leading edge, not by filling the whole row.
+                const int rowH = Dp(26);
                 const RadixType radices[] = { RadixType::Hex, RadixType::Decimal, RadixType::Octal, RadixType::Binary };
                 const int actions[] = { ACT_RADIX_HEX, ACT_RADIX_DEC, ACT_RADIX_OCT, ACT_RADIX_BIN };
-                const wchar_t* names[] = { L"HEX", L"DEC", L"OCT", L"BIN" };
                 for (int i = 0; i < 4; ++i)
                 {
                     Btn b;
-                    b.label = names[i];
                     b.action = actions[i];
-                    b.style = Style::Toggle;
+                    b.style = Style::Bit; // hover-only fill
                     b.checked = (m_radix == radices[i]);
-                    b.textDip = 12;
-                    b.rc = { pad + Dp(2), y, contentRight - Dp(4), y + rowH - Dp(1) };
+                    b.rc = { pad + Dp(2), y, contentRight - Dp(4), y + rowH - Dp(2) };
                     m_buttons.push_back(b);
                     y += rowH;
                 }
-                y += Dp(4);
+                y += Dp(6);
 
                 // Word size and the bit-flip board toggle.
                 const int stripH = Dp(kStripRowDip);
@@ -1500,7 +1524,7 @@ namespace
                 m_buttons.push_back(bitwise);
 
                 Btn shift;
-                shift.label = L"Bit Shift ";
+                shift.label = L"Bit shift ";
                 shift.action = ACT_SHIFT_MENU;
                 shift.style = Style::Flat;
                 shift.textDip = 13;
@@ -1549,61 +1573,28 @@ namespace
                 }
             }
 
-            // Scientific control strip: angle unit, hyperbolic, trig and function menus.
+            // Scientific control strip. The shipping app puts the angle unit and F-E
+            // above the memory row, and the two function menus below it.
             if (m_mode == Mode::Scientific)
             {
                 const int stripH = Dp(kStripRowDip);
-                const int usable = contentRight - pad * 2;
-                auto cell = [&](int index, int count) {
-                    RECT r;
-                    r.left = pad + MulDiv(usable, index, count) + gap;
-                    r.right = pad + MulDiv(usable, index + 1, count) - gap;
-                    r.top = y;
-                    r.bottom = y + stripH - gap;
-                    return r;
-                };
-
+            
                 Btn angle;
                 angle.label = (m_angle == Command::CommandDEG) ? L"DEG" : (m_angle == Command::CommandRAD) ? L"RAD" : L"GRAD";
                 angle.action = ACT_ANGLE_CYCLE;
                 angle.style = Style::Flat;
                 angle.textDip = 13;
-                angle.rc = cell(0, 5);
+                angle.rc = { pad + Dp(8), y, pad + Dp(64), y + stripH - gap };
                 m_buttons.push_back(angle);
-
+            
                 Btn fe;
                 fe.label = L"F-E";
                 fe.action = ACT_FE;
                 fe.style = Style::Toggle;
                 fe.checked = m_fe;
                 fe.textDip = 13;
-                fe.rc = cell(1, 5);
+                fe.rc = { pad + Dp(70), y, pad + Dp(126), y + stripH - gap };
                 m_buttons.push_back(fe);
-
-                Btn hyp;
-                hyp.label = L"hyp";
-                hyp.action = ACT_HYP;
-                hyp.style = Style::Toggle;
-                hyp.checked = m_hyp;
-                hyp.textDip = 13;
-                hyp.rc = cell(2, 5);
-                m_buttons.push_back(hyp);
-
-                Btn trig;
-                trig.label = L"Trig ";
-                trig.action = ACT_TRIG_MENU;
-                trig.style = Style::Flat;
-                trig.textDip = 13;
-                trig.rc = cell(3, 5);
-                m_buttons.push_back(trig);
-
-                Btn func;
-                func.label = L"Func ";
-                func.action = ACT_FUNC_MENU;
-                func.style = Style::Flat;
-                func.textDip = 13;
-                func.rc = cell(4, 5);
-                m_buttons.push_back(func);
                 y += stripH;
             }
 
@@ -1617,7 +1608,7 @@ namespace
                     { L"MC", ACT_MEMORY_CLEAR_ALL,  Style::Flat, false, 13 },
                     { L"MR", ACT_MEM_RECALL,        Style::Flat, false, 13 },
                     { L"M+", ACT_MEM_ADD,           Style::Flat, false, 13 },
-                    { L"M-", ACT_MEM_SUB,           Style::Flat, false, 13 },
+                    { L"M−", ACT_MEM_SUB,      Style::Flat, false, 13 },
                     { L"MS", ACT_MEM_STORE,         Style::Flat, false, 13 },
                     { L"M", ACT_MEMORY_PANEL, Style::Flat, false, 13 },
                 };
@@ -1641,6 +1632,28 @@ namespace
                     m_buttons.push_back(b);
                 }
                 y += memH;
+            }
+
+            // Trigonometry and Function menus sit below the memory row.
+            if (m_mode == Mode::Scientific)
+            {
+                const int stripH = Dp(kStripRowDip);
+                Btn trig;
+                trig.label = L"Trigonometry ";
+                trig.action = ACT_TRIG_MENU;
+                trig.style = Style::Flat;
+                trig.textDip = 13;
+                trig.rc = { pad + Dp(8), y + gap, pad + Dp(152), y + stripH - gap };
+                m_buttons.push_back(trig);
+
+                Btn func;
+                func.label = L"Function ";
+                func.action = ACT_FUNC_MENU;
+                func.style = Style::Flat;
+                func.textDip = 13;
+                func.rc = { pad + Dp(158), y + gap, pad + Dp(268), y + stripH - gap };
+                m_buttons.push_back(func);
+                y += stripH + Dp(2);
             }
 
             // Keypad fills the rest.
@@ -1822,25 +1835,27 @@ namespace
         int height;
         int weight;
         int face; // 0 = ui, 1 = display, 2 = icon
+        bool italic;
         HFONT font;
     };
 
     std::vector<FontKey> g_fonts;
 
-    HFONT GetFont(int dip, int weight = FW_NORMAL, int face = 0)
+    HFONT GetFont(int dip, int weight = FW_NORMAL, int face = 0, bool italic = false)
     {
         const int height = -Dp(dip);
         for (const auto& entry : g_fonts)
         {
-            if (entry.height == height && entry.weight == weight && entry.face == face)
+            if (entry.height == height && entry.weight == weight && entry.face == face && entry.italic == italic)
             {
                 return entry.font;
             }
         }
         const wchar_t* name = (face == 2) ? IconFontFace() : (face == 1) ? DisplayFontFace() : UiFontFace();
         HFONT font = CreateFontW(
-            height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, name);
-        g_fonts.push_back({ height, weight, face, font });
+            height, 0, 0, 0, weight, italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            VARIABLE_PITCH, name);
+        g_fonts.push_back({ height, weight, face, italic, font });
         return font;
     }
 
@@ -1890,6 +1905,11 @@ namespace
     COLORREF ButtonFill(const Btn& b, float hot, float pressed, bool& painted)
     {
         painted = true;
+        if (b.style == Style::Card)
+        {
+            // Cards keep their surface whether or not they are interactive.
+            return Blend(Blend(g_theme.card, g_theme.flatHover, b.enabled ? hot * 0.6f : 0.0f), g_theme.flatPress, pressed * 0.6f);
+        }
         if (!b.enabled)
         {
             painted = (b.style == Style::Number || b.style == Style::Operator);
@@ -1915,6 +1935,8 @@ namespace
         case Style::Bit:
             painted = active > 0.004f;
             return Blend(g_theme.flatHover, g_theme.flatPress, pressed);
+        case Style::Card:
+            return Blend(Blend(g_theme.card, g_theme.flatHover, hot * 0.6f), g_theme.flatPress, pressed * 0.6f);
         case Style::Flat:
         default:
             if (b.checked)
@@ -1929,6 +1951,11 @@ namespace
 
     // How far through its hover and press animations a given button is.
     void ButtonMotion(const CalcApp& app, const Btn& b, int index, int hotIndex, int pressedIndex, float& hot, float& pressed);
+
+    int ButtonRadius(const Btn& b)
+    {
+        return (b.style == Style::Card) ? Dp(6) : Dp(kRadiusDip);
+    }
 
     // Pointer-down shrinks the key slightly, as Fluent's pressed state does.
     RECT PressedRect(const RECT& rc, float pressed)
@@ -1946,6 +1973,10 @@ namespace
 
     COLORREF ButtonText(const Btn& b)
     {
+        if (b.style == Style::Card)
+        {
+            return g_theme.primaryText; // cards carry content even when inert
+        }
         if (!b.enabled)
         {
             return g_theme.disabledText;
@@ -1956,9 +1987,45 @@ namespace
         }
         if (b.style == Style::Bit)
         {
+            // Date fields and list rows use this style for their hover fill but
+            // carry ordinary content.
+            if (b.dateField || !b.label.empty())
+            {
+                return g_theme.primaryText;
+            }
             return b.checked ? g_theme.primaryText : g_theme.disabledText;
         }
         return g_theme.primaryText;
+    }
+
+    // The shipping app sets mathematical variables in italic: x squared, one
+    // over x, the roots, n factorial and so on. Operators and named functions
+    // (exp, mod, log, ln) stay upright.
+    bool IsVariableKey(int action)
+    {
+        if (action < kCommandBase)
+        {
+            return false;
+        }
+        switch (static_cast<Command>(action - kCommandBase))
+        {
+        case Command::CommandSQR:
+        case Command::CommandCUB:
+        case Command::CommandREC:
+        case Command::CommandSQRT:
+        case Command::CommandCUBEROOT:
+        case Command::CommandPWR:
+        case Command::CommandROOT:
+        case Command::CommandPOW10:
+        case Command::CommandPOW2:
+        case Command::CommandFAC:
+        case Command::CommandAbs:
+        case Command::CommandLogBaseY:
+        case Command::CommandPOWE:
+            return true;
+        default:
+            return false;
+        }
     }
 
     int DefaultTextDip(const Btn& b)
@@ -1980,14 +2047,24 @@ namespace
         }
     }
 
-    void DrawLabel(HDC hdc, const RECT& rc, std::wstring_view text, int dip, COLORREF color, bool icon, UINT flags, int weight = FW_NORMAL, int face = 0)
+    void DrawLabel(
+        HDC hdc,
+        const RECT& rc,
+        std::wstring_view text,
+        int dip,
+        COLORREF color,
+        bool icon,
+        UINT flags,
+        int weight = FW_NORMAL,
+        int face = 0,
+        bool italic = false)
     {
         if (icon && !IconFontAvailable())
         {
             text = IconFallback(text);
             icon = false;
         }
-        SelectObject(hdc, GetFont(dip, weight, icon ? 2 : face));
+        SelectObject(hdc, GetFont(dip, weight, icon ? 2 : face, italic));
         SetTextColor(hdc, color);
         RECT r = rc;
         DrawTextW(hdc, text.data(), static_cast<int>(text.size()), &r, flags);
@@ -2195,21 +2272,13 @@ namespace
         // Captions sit just above each row of date segments.
         for (const Btn& b : app.m_buttons)
         {
-            if (b.action == ACT_DATE_FIELD_BASE + 0)
+            if (b.action < ACT_DATE_FIELD_BASE || b.action > ACT_DATE_FIELD_BASE + 2)
             {
-                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
-                DrawCaption(hdc, caption, L"From");
+                continue;
             }
-            else if (b.action == ACT_DATE_FIELD_BASE + 3)
-            {
-                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
-                DrawCaption(hdc, caption, L"To");
-            }
-            else if (b.action == ACT_DATE_FIELD_BASE + 6)
-            {
-                RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right + Dp(200), b.rc.top - Dp(2) };
-                DrawCaption(hdc, caption, L"From");
-            }
+            const int field = b.action - ACT_DATE_FIELD_BASE;
+            RECT caption{ b.rc.left, b.rc.top - Dp(18), b.rc.right, b.rc.top - Dp(2) };
+            DrawCaption(hdc, caption, (field == 1) ? L"To" : L"From");
         }
 
         if (isDifference)
@@ -2225,12 +2294,10 @@ namespace
                 hdc,
                 app.m_dateResultRect,
                 DateMath::DescribeDifference(difference),
-                20,
+                15,
                 g_theme.primaryText,
                 false,
-                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
-                FW_SEMIBOLD,
-                1);
+                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
 
             std::wstring total = CalcEngine::NumericString::FromInteger(difference.totalDays);
             total += (difference.totalDays == 1) ? L" day" : L" days";
@@ -2252,12 +2319,10 @@ namespace
                 hdc,
                 app.m_dateResultRect,
                 DateMath::FormatLong(app.m_dateModel.Result()),
-                20,
+                15,
                 g_theme.primaryText,
                 false,
-                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
-                FW_SEMIBOLD,
-                1);
+                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
         }
     }
 
@@ -2331,7 +2396,20 @@ namespace
                 const COLORREF fill = ButtonFill(b, hot, pressed, painted);
                 if (painted)
                 {
-                    FillRounded(g, PressedRect(b.rc, pressed), Dp(kRadiusDip), fill);
+                    const RECT rc = PressedRect(b.rc, pressed);
+                    FillRounded(g, rc, ButtonRadius(b), fill);
+                    if (b.style == Style::Card)
+                    {
+                        Gdiplus::Pen outline(ToGp(g_theme.divider));
+                        Gdiplus::GraphicsPath path;
+                        const int r = Dp(6);
+                        path.AddArc(rc.left, rc.top, r * 2, r * 2, 180.0f, 90.0f);
+                        path.AddArc(rc.right - r * 2, rc.top, r * 2, r * 2, 270.0f, 90.0f);
+                        path.AddArc(rc.right - r * 2, rc.bottom - r * 2, r * 2, r * 2, 0.0f, 90.0f);
+                        path.AddArc(rc.left, rc.bottom - r * 2, r * 2, r * 2, 90.0f, 90.0f);
+                        path.CloseFigure();
+                        g.DrawPath(&outline, &path);
+                    }
                 }
             }
         }
@@ -2346,6 +2424,11 @@ namespace
             if (b.icon)
             {
                 DrawLabel(hdc, b.rc, b.label, DefaultTextDip(b), color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            else if (b.style == Style::Card)
+            {
+                RECT text{ b.rc.left + Dp(16), b.rc.top + Dp(10), b.rc.right - Dp(40), b.rc.top + Dp(32) };
+                DrawLabel(hdc, text, b.label, 14, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             }
             else
             {
@@ -2376,27 +2459,60 @@ namespace
             return;
         }
 
-        RECT title{ Dp(14) - slide, Dp(50), width - Dp(14) - slide, Dp(84) };
-        DrawLabel(hdc, title, L"Settings", 22, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
+        RECT title{ Dp(14) - slide, Dp(48), width - Dp(14) - slide, Dp(84) };
+        DrawLabel(hdc, title, L"Settings", 24, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
 
-        RECT about{ Dp(14) - slide, Dp(160), width - Dp(14) - slide, Dp(200) };
-        DrawLabel(hdc, about, L"About", 16, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+        RECT appearance{ Dp(14) - slide, Dp(96), width - Dp(14) - slide, Dp(120) };
+        DrawLabel(hdc, appearance, L"Appearance", 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
 
-        const wchar_t* lines[] = {
-            L"Calculator",
-            L"Version 1.0.0.0",
-            L"",
-            L"Built from the Windows Calculator engine",
-            L"(github.com/microsoft/calculator).",
-            L"Licensed under the MIT License.",
-        };
-        int y = Dp(200);
-        for (const wchar_t* line : lines)
+        RECT aboutHeader{ Dp(14) - slide, Dp(254), width - Dp(14) - slide, Dp(278) };
+        DrawLabel(hdc, aboutHeader, L"About", 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+
+        // Subtitles and chevrons belonging to the cards laid out above.
+        for (const Btn& b : app.m_navButtons)
         {
-            RECT row{ Dp(14) - slide, y, width - Dp(14) - slide, y + Dp(22) };
-            DrawLabel(hdc, row, line, 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-            y += Dp(22);
+            if (b.style != Style::Card)
+            {
+                continue;
+            }
+            const wchar_t* subtitle = nullptr;
+            if (b.action == ACT_APP_THEME)
+            {
+                subtitle = (app.m_themeChoice == 1) ? L"Light" : (app.m_themeChoice == 2) ? L"Dark" : L"Use system setting";
+            }
+            else if (b.action == ACT_ALWAYS_ON_TOP)
+            {
+                subtitle = app.m_alwaysOnTop ? L"On" : L"Off";
+            }
+            else if (b.action == ACT_NONE)
+            {
+                subtitle = L"\u00a9 Microsoft Corporation. Licensed under the MIT License.";
+            }
+
+            if (subtitle != nullptr)
+            {
+                // Only the expander cards reserve room for a chevron on the right.
+                const int inset = (b.action == ACT_NONE) ? Dp(16) : Dp(40);
+                RECT line{ b.rc.left + Dp(16), b.rc.top + Dp(30), b.rc.right - inset, b.rc.top + Dp(50) };
+                DrawLabel(hdc, line, subtitle, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            if (b.action == ACT_NONE)
+            {
+                RECT version{ b.rc.left + Dp(16), b.rc.top + Dp(48), b.rc.right - Dp(16), b.rc.top + Dp(68) };
+                DrawLabel(hdc, version, L"Version 1.0.0.0", 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            }
+            else
+            {
+                RECT chevron{ b.rc.right - Dp(34), b.rc.top, b.rc.right - Dp(10), b.rc.bottom };
+                DrawLabel(hdc, chevron, L"", 11, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
         }
+
+        RECT feedback{ Dp(14) - slide, Dp(374), width - Dp(14) - slide, Dp(398) };
+        DrawLabel(hdc, feedback, L"Built from the Windows Calculator engine", 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+        RECT source{ Dp(14) - slide, Dp(396), width - Dp(14) - slide, Dp(420) };
+        DrawLabel(hdc, source, L"github.com/microsoft/calculator", 13, g_theme.accent, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
     }
 
     // Everything below the overlay surfaces. Split out so a mode change can
@@ -2451,7 +2567,27 @@ namespace
             const RECT rc = PressedRect(b.rc, pressed);
             const int dip = DefaultTextDip(b);
             const COLORREF color = ButtonText(b);
-            if (b.icon)
+            if (b.combo)
+            {
+                // A combo box anchors its text to the leading edge and parks
+                // the chevron at the trailing one, rather than centring both.
+                RECT text = rc;
+                text.left += Dp(10);
+                text.right -= Dp(30);
+                DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+                RECT chevron{ rc.right - Dp(28), rc.top, rc.right - Dp(8), rc.bottom };
+                DrawLabel(hdc, chevron, L"\ue70d", dip - 2, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            else if (b.dateField)
+            {
+                RECT text = rc;
+                text.left += Dp(10);
+                text.right -= Dp(36);
+                DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+                RECT glyph{ rc.right - Dp(32), rc.top, rc.right - Dp(6), rc.bottom };
+                DrawLabel(hdc, glyph, L"", 15, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+            else if (b.icon)
             {
                 DrawLabel(hdc, rc, b.label, dip, color, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
             }
@@ -2460,6 +2596,10 @@ namespace
                 RECT text = rc;
                 text.left += Dp(44); // clear of the leading glyph
                 DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            else if (IsVariableKey(b.action))
+            {
+                DrawLabel(hdc, rc, b.label, dip, color, false, DT_SINGLELINE | DT_CENTER | DT_VCENTER, FW_NORMAL, 0, true);
             }
             else
             {
@@ -2511,24 +2651,48 @@ namespace
 
         DrawAutoFitNumber(hdc, app.m_displayRect, app.m_primary, app.m_isError ? g_theme.primaryText : g_theme.primaryText);
 
-        // Programmer readouts render their value beside the radix label.
+        // Programmer readouts: an accent bar marks the active row, then the radix
+        // name and its value, both left aligned.
         if (app.m_mode == Mode::Programmer && app.m_panel == Panel::None)
         {
-            const uint32_t radices[] = { 16, 10, 8, 2 };
+            static constexpr uint32_t radices[] = { 16, 10, 8, 2 };
+            static constexpr const wchar_t* names[] = { L"HEX", L"DEC", L"OCT", L"BIN" };
             int found = 0;
             for (const Btn& b : app.m_buttons)
             {
-                if (b.action >= ACT_RADIX_HEX && b.action <= ACT_RADIX_BIN)
+                if (b.action < ACT_RADIX_HEX || b.action > ACT_RADIX_BIN)
                 {
-                    RECT r = b.rc;
-                    r.left += Dp(46);
-                    r.right -= Dp(8);
-                    const COLORREF color = b.checked ? g_theme.accentText : g_theme.secondaryText;
-                    DrawTail(hdc, r, app.RadixText(radices[b.action - ACT_RADIX_HEX]), 13, color);
-                    if (++found == 4)
-                    {
-                        break;
-                    }
+                    continue;
+                }
+                const int index = b.action - ACT_RADIX_HEX;
+
+                if (b.checked)
+                {
+                    const int barHeight = Dp(14);
+                    const int centre = (b.rc.top + b.rc.bottom) / 2;
+                    RECT bar{ b.rc.left, centre - barHeight / 2, b.rc.left + Dp(3), centre + barHeight / 2 };
+                    HBRUSH brush = CreateSolidBrush(g_theme.accent);
+                    FillRect(hdc, &bar, brush);
+                    DeleteObject(brush);
+                }
+
+                RECT name = b.rc;
+                name.left += Dp(14);
+                name.right = name.left + Dp(46);
+                DrawLabel(
+                    hdc, name, names[index], 12, b.checked ? g_theme.primaryText : g_theme.secondaryText, false,
+                    DT_SINGLELINE | DT_LEFT | DT_VCENTER, b.checked ? FW_SEMIBOLD : FW_NORMAL);
+
+                RECT value = b.rc;
+                value.left += Dp(64);
+                value.right -= Dp(8);
+                DrawLabel(
+                    hdc, value, app.RadixText(radices[index]), 13, b.checked ? g_theme.primaryText : g_theme.secondaryText, false,
+                    DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+
+                if (++found == 4)
+                {
+                    break;
                 }
             }
         }
@@ -2565,6 +2729,41 @@ namespace
                 }
             }
         }
+        if (app.m_menuIsCalendar)
+        {
+            std::wstring title = DateMath::MonthName(app.m_calendarMonth.month);
+            title += L' ';
+            title += CalcEngine::NumericString::FromInteger(app.m_calendarMonth.year);
+            RECT header{ app.m_menuRect.left + Dp(14), app.m_menuRect.top + Dp(6), app.m_menuRect.right - Dp(76), app.m_menuRect.top + Dp(34) };
+            DrawLabel(hdc, header, title, 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+
+            static constexpr const wchar_t* weekdays[] = { L"S", L"M", L"T", L"W", L"T", L"F", L"S" };
+            const int cell = Dp(34);
+            for (int i = 0; i < 7; ++i)
+            {
+                RECT day{ app.m_menuRect.left + Dp(8) + i * cell,
+                          app.m_menuRect.top + Dp(40),
+                          app.m_menuRect.left + Dp(8) + (i + 1) * cell,
+                          app.m_menuRect.top + Dp(62) };
+                DrawLabel(hdc, day, weekdays[i], 11, g_theme.secondaryText, false, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            }
+
+            for (const Btn& b : app.m_menuButtons)
+            {
+                if (b.icon)
+                {
+                    DrawLabel(hdc, b.rc, b.label, b.textDip, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                }
+                else
+                {
+                    DrawLabel(
+                        hdc, b.rc, b.label, 13, b.enabled ? (b.checked ? g_theme.accent : g_theme.primaryText) : g_theme.disabledText, false,
+                        DT_SINGLELINE | DT_CENTER | DT_VCENTER, b.checked ? FW_SEMIBOLD : FW_NORMAL);
+                }
+            }
+            return;
+        }
+
         for (const Btn& b : app.m_menuButtons)
         {
             RECT r = b.rc;
@@ -2661,6 +2860,11 @@ namespace
     // years) are taller than the window, so they scroll rather than overflow.
     void CalcApp::LayoutMenu()
     {
+        if (m_menuIsCalendar)
+        {
+            LayoutCalendar();
+            return;
+        }
         m_menuButtons.clear();
 
         RECT client{};
@@ -2734,6 +2938,7 @@ namespace
         {
             app.m_menuItemStorage.assign(items, items + count);
         }
+        app.m_menuIsCalendar = false;
         app.m_menuAnchor = anchor;
         app.m_menuScroll = 0;
         app.m_hotMenu = -1;
@@ -2746,6 +2951,132 @@ namespace
     }
 
     // Builds the month / day / year and offset pickers for Date Calculation.
+
+    // A month grid on the flyout surface, so it inherits the card, the fade and
+    // the hit testing the dropdowns already use.
+    void CalcApp::LayoutCalendar()
+    {
+        m_menuButtons.clear();
+        m_menuLabelStorage.clear();
+
+        RECT client{};
+        GetClientRect(m_hwnd, &client);
+
+        const int cell = Dp(34);
+        const int width = cell * 7 + Dp(16);
+        const int header = Dp(40);
+        const int weekdays = Dp(22);
+        const int height = header + weekdays + cell * 6 + Dp(12);
+
+        RECT menu;
+        menu.left = m_menuAnchor.left;
+        menu.top = m_menuAnchor.bottom + Dp(2);
+        menu.right = menu.left + width;
+        menu.bottom = menu.top + height;
+        if (menu.right > client.right - Dp(4))
+        {
+            const int shift = menu.right - (client.right - Dp(4));
+            menu.left -= shift;
+            menu.right -= shift;
+        }
+        if (menu.left < Dp(4))
+        {
+            menu.right += Dp(4) - menu.left;
+            menu.left = Dp(4);
+        }
+        if (menu.bottom > client.bottom - Dp(4))
+        {
+            const int shift = menu.bottom - (client.bottom - Dp(4));
+            menu.top -= shift;
+            menu.bottom -= shift;
+        }
+        if (menu.top < Dp(4))
+        {
+            menu.top = Dp(4);
+        }
+        m_menuRect = menu;
+        m_menuContentHeight = 0;
+        m_menuScroll = 0;
+
+        Btn prev;
+        prev.label = L"";
+        prev.action = ACT_CAL_PREV;
+        prev.style = Style::Bit;
+        prev.icon = true;
+        prev.textDip = 11;
+        prev.rc = { menu.right - Dp(72), menu.top + Dp(6), menu.right - Dp(42), menu.top + Dp(34) };
+        m_menuButtons.push_back(prev);
+
+        Btn next;
+        next.label = L"";
+        next.action = ACT_CAL_NEXT;
+        next.style = Style::Bit;
+        next.icon = true;
+        next.textDip = 11;
+        next.rc = { menu.right - Dp(38), menu.top + Dp(6), menu.right - Dp(8), menu.top + Dp(34) };
+        m_menuButtons.push_back(next);
+
+        // The grid starts on the Sunday on or before the first of the month.
+        CivilDate first = m_calendarMonth;
+        first.day = 1;
+        long long firstDay = DateMath::ToDayNumber(first);
+        long long weekday = (firstDay + 4) % 7; // 1970-01-01 was a Thursday
+        if (weekday < 0)
+        {
+            weekday += 7;
+        }
+        const long long gridStart = firstDay - weekday;
+        const int daysInMonth = DateMath::DaysInMonth(m_calendarMonth.year, m_calendarMonth.month);
+
+        m_menuLabelStorage.reserve(42);
+        for (int index = 0; index < 42; ++index)
+        {
+            const CivilDate day = DateMath::FromDayNumber(gridStart + index);
+            m_menuLabelStorage.push_back(CalcEngine::NumericString::FromInteger(day.day));
+
+            const bool inMonth = (day.year == m_calendarMonth.year) && (day.month == m_calendarMonth.month);
+            Btn cellButton;
+            cellButton.label = m_menuLabelStorage.back();
+            cellButton.action = inMonth ? (ACT_CAL_DAY_BASE + day.day) : ACT_NONE;
+            cellButton.style = Style::Bit;
+            cellButton.enabled = inMonth;
+            cellButton.checked = inMonth && day.day == DateForIndex(m_calendarField).day;
+            cellButton.textDip = 13;
+            const int column = index % 7;
+            const int row = index / 7;
+            cellButton.rc = { menu.left + Dp(8) + column * cell + Dp(2),
+                              menu.top + header + weekdays + row * cell + Dp(2),
+                              menu.left + Dp(8) + (column + 1) * cell - Dp(2),
+                              menu.top + header + weekdays + (row + 1) * cell - Dp(2) };
+            m_menuButtons.push_back(cellButton);
+        }
+        (void)daysInMonth;
+    }
+
+    void CalcApp::OpenCalendar(int dateIndex)
+    {
+        m_calendarField = dateIndex;
+        m_calendarMonth = DateForIndex(dateIndex);
+        m_menuIsCalendar = true;
+
+        RECT anchor{ 0, 0, 0, 0 };
+        for (const auto& b : m_buttons)
+        {
+            if (b.action == ACT_DATE_FIELD_BASE + dateIndex)
+            {
+                anchor = b.rc;
+                break;
+            }
+        }
+        m_menuAnchor = anchor;
+        LayoutCalendar();
+        m_menuOpen = true;
+        m_menuAnim.Set(0.0f);
+        m_menuAnim.To(1.0f, kMotionFastMs);
+        EnsureFrameTimer();
+        Invalidate();
+    }
+
     void CalcApp::OpenDateFieldMenu(int fieldIndex)
     {
         m_menuLabelStorage.clear();
@@ -2835,6 +3166,7 @@ namespace
         if (app.m_menuOpen)
         {
             app.m_menuOpen = false;
+            app.m_menuIsCalendar = false;
             app.m_menuButtons.clear();
             app.m_menuAnim.To(0.0f, kMotionFastMs, EaseStandard);
             app.EnsureFrameTimer();
@@ -2937,6 +3269,7 @@ namespace
     }
 
     UnitConversionManager::Command ConverterCommandForCalcCommand(Command command);
+    void ApplyTitleBarTheme(HWND hwnd);
 
     void Execute(int action)
     {
@@ -3005,9 +3338,34 @@ namespace
             app.Relayout();
             return;
         }
+        if (action >= ACT_CAL_DAY_BASE)
+        {
+            CivilDate& date = app.DateForIndex(app.m_calendarField);
+            date.year = app.m_calendarMonth.year;
+            date.month = app.m_calendarMonth.month;
+            date.day = action - ACT_CAL_DAY_BASE;
+            CloseMenus();
+            app.Relayout();
+            return;
+        }
+        if (action == ACT_CAL_PREV || action == ACT_CAL_NEXT)
+        {
+            app.m_calendarMonth = DateMath::AddMonths(app.m_calendarMonth, (action == ACT_CAL_NEXT) ? 1 : -1);
+            app.LayoutCalendar();
+            app.Invalidate();
+            return;
+        }
         if (action >= ACT_DATE_FIELD_BASE)
         {
-            app.OpenDateFieldMenu(action - ACT_DATE_FIELD_BASE);
+            const int field = action - ACT_DATE_FIELD_BASE;
+            if (field < 3)
+            {
+                app.OpenCalendar(field);
+            }
+            else
+            {
+                app.OpenDateFieldMenu(field);
+            }
             return;
         }
         if (action >= ACT_CONV_UNIT_TO_BASE)
@@ -3097,6 +3455,13 @@ namespace
             app.m_settingsAnim.To(app.m_settingsOpen ? 1.0f : 0.0f, kMotionNormalMs);
             app.m_navAnim.To(0.0f, kMotionNormalMs);
             app.EnsureFrameTimer();
+            app.Relayout();
+            break;
+        case ACT_APP_THEME:
+            app.m_themeChoice = (app.m_themeChoice + 1) % 3;
+            g_themeOverride = app.m_themeChoice;
+            LoadTheme();
+            ApplyTitleBarTheme(app.m_hwnd);
             app.Relayout();
             break;
         case ACT_ALWAYS_ON_TOP:
@@ -3245,7 +3610,21 @@ namespace
             break;
         case ACT_TRIG_MENU:
         {
-            const MenuItem* items = app.m_hyp ? (app.m_second ? kHypMenuInverse : kHypMenu) : (app.m_second ? kTrigMenuInverse : kTrigMenu);
+            // One flyout lists the circular functions and then the hyperbolic
+            // ones, with "2nd" swapping both sets for their inverses.
+            const MenuItem* circular = app.m_second ? kTrigMenuInverse : kTrigMenu;
+            const MenuItem* hyperbolic = app.m_second ? kHypMenuInverse : kHypMenu;
+            app.m_menuItemStorage.clear();
+            app.m_menuItemStorage.reserve(12);
+            for (int i = 0; i < 6; ++i)
+            {
+                app.m_menuItemStorage.push_back(circular[i]);
+            }
+            for (int i = 0; i < 6; ++i)
+            {
+                app.m_menuItemStorage.push_back(hyperbolic[i]);
+            }
+
             RECT anchor{ 0, 0, 0, 0 };
             for (const auto& b : app.m_buttons)
             {
@@ -3255,7 +3634,7 @@ namespace
                     break;
                 }
             }
-            OpenMenu(items, 6, anchor);
+            OpenMenu(app.m_menuItemStorage.data(), app.m_menuItemStorage.size(), anchor);
             break;
         }
         case ACT_FUNC_MENU:
@@ -3647,7 +4026,12 @@ namespace
                 else
                 {
                     const int action = app.m_menuButtons[static_cast<size_t>(index)].action;
-                    CloseMenus();
+                    // The month arrows keep the picker open; everything else
+                    // dismisses it.
+                    if (action != ACT_CAL_PREV && action != ACT_CAL_NEXT)
+                    {
+                        CloseMenus();
+                    }
                     Execute(action);
                     app.Invalidate();
                 }
@@ -3924,6 +4308,7 @@ namespace
             unit.style = Style::Flat;
             unit.textDip = 13;
             unit.checked = (m_converterModel->IsSecondFieldActive() != isFrom);
+            unit.combo = true;
             unit.rc = { pad + Dp(8), y, (std::min)(contentRight - Dp(8), pad + Dp(260)), y + Dp(30) };
             m_buttons.push_back(unit);
             y += Dp(38);
@@ -4001,7 +4386,8 @@ namespace
 
         // Mode picker.
         Btn modeButton;
-        modeButton.label = isDifference ? L"Difference between dates " : L"Add or subtract days ";
+        modeButton.label = isDifference ? L"Difference between dates" : L"Add or subtract days";
+        modeButton.combo = true;
         modeButton.action = isDifference ? ACT_DATE_MODE_OFFSET : ACT_DATE_MODE_DIFF;
         modeButton.style = Style::Flat;
         modeButton.textDip = 13;
@@ -4009,32 +4395,23 @@ namespace
         m_buttons.push_back(modeButton);
         y += Dp(48);
 
-        // One row of three segments (month / day / year) per date.
+        // A single field per date, reading "September 18, 2026" with a calendar
+        // glyph at its trailing edge, as the shipping app shows it.
         const auto addDateRow = [&](CivilDate& date, int dateIndex) {
-            const int usable = contentRight - pad * 2 - Dp(16);
-            const int widths[3] = { usable * 45 / 100, usable * 22 / 100, usable * 33 / 100 };
-            int x = pad + Dp(10);
-            for (int segment = 0; segment < 3; ++segment)
-            {
-                Btn field;
-                field.action = ACT_DATE_FIELD_BASE + dateIndex * 3 + segment;
-                field.style = Style::Flat;
-                field.checked = true; // always shows its box, like a picker
-                field.textDip = 13;
-                if (segment == 0)
-                {
-                    field.label = DateMath::MonthName(date.month);
-                }
-                else
-                {
-                    m_dateFieldText[dateIndex * 3 + segment] =
-                        CalcEngine::NumericString::FromInteger(segment == 1 ? date.day : date.year);
-                    field.label = m_dateFieldText[dateIndex * 3 + segment];
-                }
-                field.rc = { x + Dp(2), y, x + widths[segment] - Dp(2), y + Dp(34) };
-                m_buttons.push_back(field);
-                x += widths[segment];
-            }
+            m_dateFieldText[dateIndex] = DateMath::MonthName(date.month);
+            m_dateFieldText[dateIndex] += L' ';
+            m_dateFieldText[dateIndex] += CalcEngine::NumericString::FromInteger(date.day);
+            m_dateFieldText[dateIndex] += L", ";
+            m_dateFieldText[dateIndex] += CalcEngine::NumericString::FromInteger(date.year);
+
+            Btn field;
+            field.label = m_dateFieldText[dateIndex];
+            field.action = ACT_DATE_FIELD_BASE + dateIndex;
+            field.style = Style::Bit; // hover-only fill, like a text field
+            field.textDip = 14;
+            field.dateField = true;
+            field.rc = { pad + Dp(10), y, contentRight - Dp(10), y + Dp(34) };
+            m_buttons.push_back(field);
             y += Dp(44);
         };
 
@@ -4209,16 +4586,34 @@ namespace
         back.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
         PushNav(back);
 
-        Btn onTop;
-        onTop.label = m_alwaysOnTop ? L"Always on top: On" : L"Always on top: Off";
-        onTop.action = ACT_ALWAYS_ON_TOP;
-        onTop.style = Style::Flat;
-        onTop.checked = m_alwaysOnTop;
-        onTop.textDip = 14;
-        onTop.leftAlign = true;
-        onTop.rc = { pad + Dp(12), Dp(96), width - Dp(12), Dp(136) };
-        PushNav(onTop);
+        // Two cards under their section headers, as the shipping settings page
+        // lays them out.
+        Btn theme;
+        theme.label = L"App theme";
+        theme.action = ACT_APP_THEME;
+        theme.style = Style::Card;
+        theme.textDip = 14;
+        theme.rc = { Dp(14), Dp(122), width - Dp(14), Dp(178) };
+        PushNav(theme);
+
+        Btn about;
+        about.label = L"Calculator";
+        about.action = ACT_NONE;
+        about.style = Style::Card;
+        about.enabled = false;
+        about.textDip = 14;
+        about.rc = { Dp(14), Dp(286), width - Dp(14), Dp(360) };
+        PushNav(about);
+
+        Btn alwaysOnTop;
+        alwaysOnTop.label = L"Always on top";
+        alwaysOnTop.action = ACT_ALWAYS_ON_TOP;
+        alwaysOnTop.style = Style::Card;
+        alwaysOnTop.textDip = 14;
+        alwaysOnTop.rc = { Dp(14), Dp(186), width - Dp(14), Dp(242) };
+        PushNav(alwaysOnTop);
 
         m_navContentHeight = height;
     }
+
 }

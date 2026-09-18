@@ -1,7 +1,7 @@
 # Calculator (compact build)
 
 A native Win32 front end for the Windows Calculator engine in this repository,
-built as a single self-contained `Calculator.exe` of **under 350 KB**.
+built as a single self-contained `Calculator.exe` of **under 425 KB**.
 
 The arithmetic and the unit conversions are not reimplementations:
 `src/CalcManager` — the same engine the shipping app uses, including the Ratpack
@@ -18,9 +18,9 @@ drawing, which is where the size saving comes from.
 | Area | Included |
 | --- | --- |
 | Standard | Full keypad, `%`, `1/x`, `x²`, `²√x`, `+/−` |
-| Scientific | Full keypad, `2ⁿᵈ` inverse toggle, DEG/RAD/GRAD, `hyp`, `F-E`, trig and function flyouts, parentheses with open-paren counter |
+| Scientific | Full keypad, `2ⁿᵈ` inverse toggle, DEG/RAD/GRAD, `F-E`, trig (including the hyperbolic functions) and function flyouts, parentheses with open-paren counter |
 | Programmer | HEX/DEC/OCT/BIN readouts, radix switching, QWORD/DWORD/WORD/BYTE, bitwise and bit-shift flyouts, 64-bit bit-flip board, A–F keys with radix-aware enabling |
-| Date Calculation | Difference between dates, and add/subtract years-months-days, with month/day/year pickers |
+| Date Calculation | Difference between dates, and add/subtract years-months-days, with a calendar flyout on each date field |
 | Converter | All 12 unit categories — Volume, Length, Weight and mass, Temperature, Energy, Area, Speed, Time, Power, Data, Pressure, Angle — 158 units, the whimsical units, and the "About equal to" suggestions |
 | Memory | `MC MR M+ M- MS` strip plus the multi-slot memory list with per-slot commands |
 | History | Panel with newest-first entries; clicking one restores it by replaying its stored commands |
@@ -62,6 +62,22 @@ need a true fade (mode change, flyouts) render to an offscreen layer and
 `AlphaBlend` it, rather than faking it with colour interpolation. The frame
 timer only runs while something is moving.
 
+## Visual fidelity
+
+The layout was checked side by side against screenshots of the shipping app and
+corrected where it diverged:
+
+| Where | What changed |
+| --- | --- |
+| Keypad | 6px between keys and the same margin around the grid, instead of running the keys to the window edge; 4px corner radius |
+| Standard, Scientific | Mathematical variables set in italic — `x²`, `¹/ₓ`, `²√x`, `xʸ`, `10ˣ`, `n!`, `|x|` — while operators and named functions (`exp`, `mod`, `log`, `ln`) stay upright |
+| Scientific | DEG and F-E moved above the memory strip; the Trigonometry and Function dropdowns below it. The separate `hyp` toggle is gone, its functions folded into the 12-item Trigonometry flyout, as the shipping app does it |
+| Programmer | HEX/DEC/OCT/BIN left-aligned with an accent bar marking the active radix, rather than a filled toggle; `«` / `»` for the shifts; "Bit shift" in sentence case |
+| Date Calculation | One field per date reading "September 18, 2026" with a calendar flyout, replacing three month/day/year spinners |
+| Settings | Rebuilt as cards under "Appearance" and "About" section headers, replacing a flat list of rows |
+| Combo boxes | Unit pickers and the date-mode picker anchor their text to the leading edge with the chevron at the trailing one, instead of centring both |
+| Glyphs | `M−` uses a real minus sign (U+2212), not a hyphen |
+
 ## Building
 
 Needs `mingw-w64` on Linux, or run it under MSYS2/WSL on Windows:
@@ -72,7 +88,7 @@ sudo apt-get install mingw-w64
 ./build.sh --arch i686          # 32-bit (note: larger, see below)
 ```
 
-`build.sh` fails if the binary exceeds the size budget (350 KB by default,
+`build.sh` fails if the binary exceeds the size budget (425 KB by default,
 override with `CALC_SIZE_BUDGET_KB`).
 
 ## Tests
