@@ -13,7 +13,9 @@
 #include <cassert>
 #include <intsafe.h>
 #include <list>
+#ifdef _MSC_VER
 #include <ppltasks.h>
+#endif
 #include <regex>
 #include <sstream>
 #include <string>

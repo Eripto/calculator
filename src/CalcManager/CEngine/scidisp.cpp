@@ -13,8 +13,6 @@
 * Author:
 \****************************************************************************/
 
-#include <sstream>
-#include <regex>
 #include "Header Files/CalcEngine.h"
 
 using namespace std;
@@ -22,8 +20,59 @@ using namespace CalcEngine;
 
 constexpr int MAX_EXPONENT = 4;
 constexpr uint32_t MAX_GROUPING_SIZE = 16;
-constexpr wstring_view c_decPreSepStr = L"[+-]?(\\d*)[";
-constexpr wstring_view c_decPostSepStr = L"]?(\\d*)(?:e[+-]?(\\d*))?$";
+// Hand-rolled equivalent of  regex_match(s, L"[+-]?(\\d*)[<sep>]?(\\d*)(?:e[+-]?(\\d*))?$")
+// -- the whole string must match. The grammar is deterministic (the separator
+// and 'e' are never digits, so the greedy \\d* runs can never over-consume and
+// need backtracking), which makes this a faithful substitute for std::wregex
+// while keeping the regex and locale machinery out of every binary that links
+// the engine.
+static bool MatchDecimalNumber(
+    const wstring& text,
+    wchar_t decimalSeparator,
+    _Out_ wstring& integerDigits,
+    _Out_ size_t& fractionLength,
+    _Out_ size_t& exponentLength)
+{
+    const size_t length = text.size();
+    size_t i = 0;
+
+    const auto scanDigits = [&text, length, &i]() -> size_t {
+        const size_t start = i;
+        while (i < length && text[i] >= L'0' && text[i] <= L'9')
+        {
+            i++;
+        }
+        return i - start;
+    };
+
+    if (i < length && (text[i] == L'+' || text[i] == L'-'))
+    {
+        i++;
+    }
+
+    const size_t integerStart = i;
+    integerDigits.assign(text, integerStart, scanDigits());
+
+    if (i < length && text[i] == decimalSeparator)
+    {
+        i++;
+    }
+
+    fractionLength = scanDigits();
+
+    exponentLength = 0;
+    if (i < length && text[i] == L'e')
+    {
+        i++;
+        if (i < length && (text[i] == L'+' || text[i] == L'-'))
+        {
+            i++;
+        }
+        exponentLength = scanDigits();
+    }
+
+    return i == length;
+}
 
 /****************************************************************************\
 * void DisplayNum(void)
@@ -140,18 +189,18 @@ int CCalcEngine::IsNumberInvalid(const wstring& numberString, int iMaxExp, int i
         // in case there's an exponent:
         //      its optionally followed by a + or -
         //      which is followed by zero or more digits
-        wregex rx(wstring{ c_decPreSepStr } + m_decimalSeparator + wstring{ c_decPostSepStr });
-        wsmatch matches;
-        if (regex_match(numberString, matches, rx))
+        wstring exp;
+        size_t fractionLength = 0;
+        size_t exponentLength = 0;
+        if (MatchDecimalNumber(numberString, m_decimalSeparator, exp, fractionLength, exponentLength))
         {
             // Check that exponent isn't too long
-            if (matches.length(3) > iMaxExp)
+            if (static_cast<int>(exponentLength) > iMaxExp)
             {
                 iError = IDS_ERR_INPUT_OVERFLOW;
             }
             else
             {
-                wstring exp = matches.str(1);
                 auto intItr = exp.begin();
                 auto intEnd = exp.end();
                 while (intItr != intEnd && *intItr == L'0')
@@ -159,7 +208,7 @@ int CCalcEngine::IsNumberInvalid(const wstring& numberString, int iMaxExp, int i
                     intItr++;
                 }
 
-                auto iMantissa = distance(intItr, intEnd) + matches.length(2);
+                auto iMantissa = distance(intItr, intEnd) + static_cast<ptrdiff_t>(fractionLength);
                 if (iMantissa > iMaxMantissa)
                 {
                     iError = IDS_ERR_INPUT_OVERFLOW;

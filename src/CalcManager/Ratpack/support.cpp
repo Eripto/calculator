@@ -20,7 +20,10 @@
 
 #include <string>
 #include <cstring>  // for memmove
-#include <iostream> // for wostream
+#include <cmath>    // for ceil, log2
+#if defined(GEN_CONST)
+#include <iostream> // for wcout, used only by the constant-dump helpers
+#endif
 #include "ratpak.h"
 
 using namespace std;
@@ -564,6 +567,8 @@ void inbetween(_In_ PRAT* px, _In_ PRAT range, int32_t precision)
     }
 }
 
+#if defined(GEN_CONST)
+
 //---------------------------------------------------------------------------
 //
 //  FUNCTION: _dumprawrat
@@ -609,6 +614,8 @@ void _dumprawnum(_In_ const wchar_t* varname, _In_ PNUMBER num, wostream& out)
     out << L"}\n";
     out << L"};\n";
 }
+
+#endif // GEN_CONST
 
 void _readconstants(void)
 
@@ -713,3 +720,4 @@ void trimit(_Inout_ PRAT* px, int32_t precision)
         pq->exp -= trim;
     }
 }
+
