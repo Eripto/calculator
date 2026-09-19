@@ -235,10 +235,18 @@ and a frame that was compositing a transition or a flyout fade created a second
 and sometimes a third. At 360x620x32bpp each one is 892KB.
 
 They are now retained in a small `Surface` wrapper, recreated only when the
-client area changes size, shared between the two transitions that composite
-through `AlphaBlend` (they never overlap inside a frame), and released
-altogether two seconds after everything settles, when the window is minimised,
-and on shutdown. The idle process holds no full-window bitmaps at all.
+client area changes size and shared between the two transitions that composite
+through `AlphaBlend` (they never overlap inside a frame). The scratch layer is
+released as soon as a transition ends, and both go when the window is minimised
+or closed.
+
+The back buffer deliberately stays put while the window is on screen. An
+earlier version released it on a two-second idle timer and emptied the working
+set along with it, which turned out to be worse than doing nothing: the trim
+dropped the working set, the very next paint reallocated the buffer and faulted
+every page back in, and two seconds later it repeated. Task Manager showed that
+as memory jumping about, and the page faults made each paint slower. Holding
+one buffer steady costs 892KB and stays flat.
 
 Counted inside the app over an identical scripted session -- three cycles of
 Standard, Scientific, Programmer, Standard:

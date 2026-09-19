@@ -3204,7 +3204,11 @@ namespace
         // wherever the function is undefined or jumps the way it does either
         // side of an asymptote.
         {
-            std::vector<Gdiplus::PointF> points;
+            // Held across paints rather than rebuilt each time: the plot
+            // repaints on every hover and every pan, and this is one allocation
+            // of a few thousand points in the hottest path in the app.
+            static std::vector<Gdiplus::PointF> points;
+            points.clear();
             points.reserve(static_cast<size_t>(width) + 2);
             const double breakThreshold = ySpan * 4.0;
 
@@ -3555,6 +3559,15 @@ namespace
     // Manager reports as an app's memory, and a burst of compositing leaves a
     // lot of it resident that nothing will read again. Pages fault back in on
     // demand, so this changes the footprint and nothing else.
+    // Empties the working set and decommits the heap's free blocks.
+    //
+    // Only worth doing when the window is minimised. Run on a short idle timer
+    // instead -- which is what this used to do -- it sets up a sawtooth: the
+    // trim drops the working set, the very next paint reallocates the back
+    // buffer and faults every page back in, and two seconds later it all
+    // happens again. Task Manager shows that as memory jumping about, and the
+    // page faults make the paint slower into the bargain. The average was no
+    // better than simply holding one buffer steady.
     void TrimWorkingSet()
     {
         SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
@@ -5558,12 +5571,6 @@ namespace
                 PaintApp(hdc, width, height);
             }
             EndPaint(hwnd, &ps);
-            if (!app.AnimationsRunning())
-            {
-                // Re-arming with the same id pushes the deadline out, so a busy
-                // window keeps its buffer and a still one gives it up.
-                SetTimer(hwnd, 3, 2000, nullptr);
-            }
             return 0;
         }
 
@@ -5756,17 +5763,7 @@ namespace
         }
 
         case WM_TIMER:
-            if (wParam == 3)
-            {
-                // Settled. Nothing is going to composite again until something
-                // moves, so hand both bitmaps back rather than sit on ~1.7MB of
-                // them; the next paint rebuilds what it needs.
-                KillTimer(hwnd, 3);
-                g_scratch.Release();
-                g_backBuffer.Release();
-                TrimWorkingSet();
-            }
-            else if (wParam == 1)
+            if (wParam == 1)
             {
                 KillTimer(hwnd, 1);
                 app.m_pressed = -1;
@@ -5950,12 +5947,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
         if (wasAnimating && !animating)
         {
             // The scratch layer only exists for transitions, so let it go as
-            // soon as one ends, and trim shortly after in case another follows.
+            // soon as one ends. The back buffer stays: the next paint needs it,
+            // and releasing it only guarantees an allocation to get it back.
             g_scratch.Release();
-            if (g_app.m_hwnd != nullptr)
-            {
-                SetTimer(g_app.m_hwnd, 3, 2000, nullptr);
-            }
         }
         wasAnimating = animating;
 
