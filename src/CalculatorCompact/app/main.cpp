@@ -2648,6 +2648,111 @@ namespace
         }
     }
 
+    // A cached off-screen surface.
+    //
+    // Every frame used to create and destroy a full-window bitmap: at 360x620
+    // that is 892KB allocated and freed, and an animating frame wanted two or
+    // three of them at once. Holding one and recreating it only when the client
+    // area changes size draws exactly the same pixels while allocating nothing
+    // per frame, and lets the surfaces be handed back entirely when the app is
+    // idle.
+    class Surface
+    {
+    public:
+        HDC Acquire(HDC reference, int width, int height)
+        {
+            if (m_dc != nullptr && (m_width != width || m_height != height))
+            {
+                Release();
+            }
+            if (m_dc == nullptr)
+            {
+                if (width <= 0 || height <= 0)
+                {
+                    return nullptr;
+                }
+                m_dc = CreateCompatibleDC(reference);
+                if (m_dc == nullptr)
+                {
+                    return nullptr;
+                }
+                m_bitmap = CreateCompatibleBitmap(reference, width, height);
+                if (m_bitmap == nullptr)
+                {
+                    DeleteDC(m_dc);
+                    m_dc = nullptr;
+                    return nullptr;
+                }
+                m_previous = SelectObject(m_dc, m_bitmap);
+                m_width = width;
+                m_height = height;
+            }
+            return m_dc;
+        }
+
+        void Release()
+        {
+            if (m_dc == nullptr)
+            {
+                return;
+            }
+            SelectObject(m_dc, m_previous);
+            DeleteObject(m_bitmap);
+            DeleteDC(m_dc);
+            m_dc = nullptr;
+            m_bitmap = nullptr;
+            m_previous = nullptr;
+            m_width = 0;
+            m_height = 0;
+        }
+
+        bool Held() const
+        {
+            return m_dc != nullptr;
+        }
+
+    private:
+        HDC m_dc = nullptr;
+        HBITMAP m_bitmap = nullptr;
+        HGDIOBJ m_previous = nullptr;
+        int m_width = 0;
+        int m_height = 0;
+    };
+
+    // The window's double buffer, and one scratch layer shared by the two
+    // transitions that composite through AlphaBlend. They never overlap within
+    // a frame: the content layer is blended and finished with before the
+    // overlays are drawn.
+    // Hands back the pages an animation touched. The working set is what Task
+    // Manager reports as an app's memory, and a burst of compositing leaves a
+    // lot of it resident that nothing will read again. Pages fault back in on
+    // demand, so this changes the footprint and nothing else.
+    void TrimWorkingSet()
+    {
+        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+
+        // Also decommit the heap's free blocks. Laying out a mode churns a lot
+        // of small allocations; once they are freed the heap keeps the pages
+        // unless it is asked to give them back. Resolved at runtime because the
+        // mingw headers predate the flag.
+        struct OptimizeResources
+        {
+            DWORD version;
+            DWORD flags;
+        };
+        using HeapSetInformationFn = BOOL(WINAPI*)(HANDLE, int, PVOID, SIZE_T);
+        static const auto heapSetInformation = reinterpret_cast<HeapSetInformationFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "HeapSetInformation")));
+        if (heapSetInformation != nullptr)
+        {
+            OptimizeResources optimize{ 1, 0 };
+            heapSetInformation(nullptr, 3 /* HeapOptimizeResources */, &optimize, sizeof(optimize));
+        }
+    }
+
+    Surface g_backBuffer;
+    Surface g_scratch;
+
     void PaintNavOverlay(HDC hdc, CalcApp& app, int width, int height)
     {
         const bool nav = app.NavVisible();
@@ -3241,9 +3346,12 @@ namespace
         // Fading the flyout means compositing it over a copy of the frame, since
         // GDI text has no alpha of its own.
         const int lift = static_cast<int>(Dp(10) * (1.0f - menu));
-        HDC layer = CreateCompatibleDC(hdc);
-        HBITMAP layerBitmap = CreateCompatibleBitmap(hdc, width, height);
-        HGDIOBJ previous = SelectObject(layer, layerBitmap);
+        HDC layer = g_scratch.Acquire(hdc, width, height);
+        if (layer == nullptr)
+        {
+            PaintFlyout(hdc);
+            return;
+        }
         BitBlt(layer, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
         SetBkMode(layer, TRANSPARENT);
         PaintFlyout(layer);
@@ -3252,10 +3360,6 @@ namespace
         blend.BlendOp = AC_SRC_OVER;
         blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * menu);
         AlphaBlend(hdc, 0, lift, width, height - lift, layer, 0, 0, width, height - lift, blend);
-
-        SelectObject(layer, previous);
-        DeleteObject(layerBitmap);
-        DeleteDC(layer);
     }
 
     // Composites the frame: content (faded and lifted while a mode is entering)
@@ -3281,9 +3385,15 @@ namespace
         FillRect(hdc, &full, background);
         DeleteObject(background);
 
-        HDC layer = CreateCompatibleDC(hdc);
-        HBITMAP layerBitmap = CreateCompatibleBitmap(hdc, width, height);
-        HGDIOBJ previous = SelectObject(layer, layerBitmap);
+        HDC layer = g_scratch.Acquire(hdc, width, height);
+        if (layer == nullptr)
+        {
+            // Out of GDI memory: draw straight to the target rather than lose
+            // the frame. The transition is the only thing that suffers.
+            PaintContent(hdc, width, height);
+            PaintOverlays(hdc, width, height);
+            return;
+        }
 
         PaintContent(layer, width, height);
 
@@ -3291,10 +3401,6 @@ namespace
         blend.BlendOp = AC_SRC_OVER;
         blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * enter);
         AlphaBlend(hdc, 0, rise, width, height - rise, layer, 0, 0, width, height - rise, blend);
-
-        SelectObject(layer, previous);
-        DeleteObject(layerBitmap);
-        DeleteDC(layer);
 
         PaintOverlays(hdc, width, height);
     }
@@ -4388,6 +4494,13 @@ namespace
             return 0;
 
         case WM_SIZE:
+            if (wParam == SIZE_MINIMIZED)
+            {
+                // Nothing is on screen to hold a buffer for.
+                g_backBuffer.Release();
+                g_scratch.Release();
+                TrimWorkingSet();
+            }
             app.Relayout();
             return 0;
 
@@ -4414,17 +4527,25 @@ namespace
             const int width = client.right;
             const int height = client.bottom;
 
-            HDC memDC = CreateCompatibleDC(hdc);
-            HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
-            HGDIOBJ oldBitmap = SelectObject(memDC, bitmap);
-
-            PaintApp(memDC, width, height);
-
-            BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
-            SelectObject(memDC, oldBitmap);
-            DeleteObject(bitmap);
-            DeleteDC(memDC);
+            // PaintApp fills the whole client area before it draws anything,
+            // so the retained buffer never shows stale pixels.
+            HDC memDC = g_backBuffer.Acquire(hdc, width, height);
+            if (memDC != nullptr)
+            {
+                PaintApp(memDC, width, height);
+                BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+            }
+            else
+            {
+                PaintApp(hdc, width, height);
+            }
             EndPaint(hwnd, &ps);
+            if (!app.AnimationsRunning())
+            {
+                // Re-arming with the same id pushes the deadline out, so a busy
+                // window keeps its buffer and a still one gives it up.
+                SetTimer(hwnd, 3, 2000, nullptr);
+            }
             return 0;
         }
 
@@ -4573,7 +4694,17 @@ namespace
         }
 
         case WM_TIMER:
-            if (wParam == 1)
+            if (wParam == 3)
+            {
+                // Settled. Nothing is going to composite again until something
+                // moves, so hand both bitmaps back rather than sit on ~1.7MB of
+                // them; the next paint rebuilds what it needs.
+                KillTimer(hwnd, 3);
+                g_scratch.Release();
+                g_backBuffer.Release();
+                TrimWorkingSet();
+            }
+            else if (wParam == 1)
             {
                 KillTimer(hwnd, 1);
                 app.m_pressed = -1;
@@ -4658,6 +4789,8 @@ namespace
             return 0;
 
         case WM_DESTROY:
+            g_backBuffer.Release();
+            g_scratch.Release();
             PostQuitMessage(0);
             return 0;
 
@@ -4670,9 +4803,21 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 {
+    // GDI+ normally spins up a background thread to watch for display changes.
+    // This app redraws on WM_DISPLAYCHANGE and DPI changes anyway, so suppress
+    // it and pump the notification hook ourselves: one fewer thread, and its
+    // stack with it.
     Gdiplus::GdiplusStartupInput startupInput;
+    startupInput.SuppressBackgroundThread = TRUE;
+    Gdiplus::GdiplusStartupOutput startupOutput{};
     ULONG_PTR gdiplusToken = 0;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &startupInput, nullptr);
+    ULONG_PTR gdiplusHook = 0;
+    bool gdiplusHooked = false;
+    if (Gdiplus::GdiplusStartup(&gdiplusToken, &startupInput, &startupOutput) == Gdiplus::Ok
+        && startupOutput.NotificationHook != nullptr)
+    {
+        gdiplusHooked = (startupOutput.NotificationHook(&gdiplusHook) == Gdiplus::Ok);
+    }
 
     LoadTheme();
 
@@ -4719,9 +4864,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     // loop goes back to blocking on GetMessage as soon as everything settles.
     MSG message{};
     bool running = true;
+    bool wasAnimating = false;
     while (running)
     {
-        if (!g_app.AnimationsRunning())
+        const bool animating = g_app.AnimationsRunning();
+        if (wasAnimating && !animating)
+        {
+            // The scratch layer only exists for transitions, so let it go as
+            // soon as one ends, and trim shortly after in case another follows.
+            g_scratch.Release();
+            if (g_app.m_hwnd != nullptr)
+            {
+                SetTimer(g_app.m_hwnd, 3, 2000, nullptr);
+            }
+        }
+        wasAnimating = animating;
+
+        if (!animating)
         {
             if (GetMessageW(&message, nullptr, 0, 0) <= 0)
             {
@@ -4755,6 +4914,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     }
 
     ClearFontCache();
+    g_backBuffer.Release();
+    g_scratch.Release();
+    if (gdiplusHooked && startupOutput.NotificationUnhook != nullptr)
+    {
+        startupOutput.NotificationUnhook(gdiplusHook);
+    }
     Gdiplus::GdiplusShutdown(gdiplusToken);
     return static_cast<int>(message.wParam);
 }

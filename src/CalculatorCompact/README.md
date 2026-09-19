@@ -163,6 +163,43 @@ GCC fall back to SjLj exceptions, which mingw does not provide; and a 32-bit
 build is larger, because its DWARF exception tables outweigh the smaller
 pointers.
 
+## Memory
+
+The window's off-screen buffers dominate the footprint, and they used to be
+rebuilt constantly. Every `WM_PAINT` created and destroyed a full-window bitmap,
+and a frame that was compositing a transition or a flyout fade created a second
+and sometimes a third. At 360x620x32bpp each one is 892KB.
+
+They are now retained in a small `Surface` wrapper, recreated only when the
+client area changes size, shared between the two transitions that composite
+through `AlphaBlend` (they never overlap inside a frame), and released
+altogether two seconds after everything settles, when the window is minimised,
+and on shutdown. The idle process holds no full-window bitmaps at all.
+
+Counted inside the app over an identical scripted session -- three cycles of
+Standard, Scientific, Programmer, Standard:
+
+| | Bitmap allocations | Bitmap memory requested |
+| --- | --- | --- |
+| Before | 779 | 663 MB |
+| After | 19 | 16 MB |
+
+Alongside that, GDI+ is started with `SuppressBackgroundThread` and its
+notification hook pumped by hand, which drops a thread and its stack, and the
+settle timer asks the OS to trim the working set and decommit the heap's free
+blocks -- laying out a mode churns a lot of small allocations that the heap
+otherwise keeps the pages for.
+
+None of this changes what is drawn: the five screens captured before and after
+are pixel-identical, zero differing pixels.
+
+A word on the target. Under 100KB is not reachable for a Win32 window, and the
+arithmetic says so before any profiling does: one back buffer for this window is
+892KB on its own, GDI+ maps several MB when it initialises, and a process that
+has merely loaded user32, gdi32 and the CRT is past a megabyte before it draws
+anything. What was achievable was removing the churn, and that is what the table
+above measures.
+
 ## Requirements
 
 Windows 10 or 11, x86-64. No installer, no runtime, no DLLs to ship — GDI,
