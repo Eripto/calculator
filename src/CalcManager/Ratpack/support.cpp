@@ -46,6 +46,7 @@ static int cbitsofprecision = 0;
 #define DUMPRAWRAT(v)
 #define DUMPRAWNUM(v)
 #define READRAWRAT(v)                                                                                                                                          \
+    destroyrat(v);                                                                                                                                             \
     createrat(v);                                                                                                                                              \
     DUPNUM((v)->pp, (&(init_p_##v)));                                                                                                                          \
     DUPNUM((v)->pq, (&(init_q_##v)));
