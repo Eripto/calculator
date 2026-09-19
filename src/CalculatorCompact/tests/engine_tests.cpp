@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "GraphModel.h"
+
 #include "CalculatorManager.h"
 #include "CalculatorResource.h"
 #include "Command.h"
@@ -755,6 +757,104 @@ namespace
     }
 }
 
+namespace
+{
+    void TestGraphing()
+    {
+        std::cout << "graphing\n";
+
+        const auto value = [](const wchar_t* text, double x) {
+            Graphing::Expression expression;
+            if (!expression.Compile(text))
+            {
+                return std::nan("");
+            }
+            return expression.Evaluate(x);
+        };
+        const auto close = [](double a, double b) {
+            return std::fabs(a - b) <= 1e-9 * (1.0 + std::fabs(b));
+        };
+        const auto parses = [](const wchar_t* text) {
+            Graphing::Expression expression;
+            return expression.Compile(text);
+        };
+
+        // Shape of the grammar.
+        Check(close(value(L"x", 3.0), 3.0), "x");
+        Check(close(value(L"y=x^2", 4.0), 16.0), "leading y= is stripped");
+        Check(close(value(L"2x", 5.0), 10.0), "implicit multiplication by a number");
+        Check(close(value(L"(x+1)(x-1)", 4.0), 15.0), "implicit multiplication of groups");
+        Check(close(value(L"3sin(x)", 0.0), 0.0), "implicit multiplication of a call");
+        Check(close(value(L"x^2+2x+1", 3.0), 16.0), "polynomial");
+
+        // Precedence and associativity.
+        Check(close(value(L"2^3^2", 0.0), 512.0), "power is right associative");
+        Check(close(value(L"-2^2", 0.0), -4.0), "unary minus binds looser than power");
+        Check(close(value(L"-x^2", 3.0), -9.0), "negated square");
+        Check(close(value(L"1-2-3", 0.0), -4.0), "subtraction is left associative");
+        Check(close(value(L"8/4/2", 0.0), 1.0), "division is left associative");
+
+        // Functions, constants and the forms the keypads produce.
+        Check(close(value(L"sqrt(x)", 9.0), 3.0), "sqrt");
+        Check(close(value(L"cbrt(27)", 0.0), 3.0), "cbrt");
+        Check(close(value(L"|x|", -5.0), 5.0), "absolute value bars");
+        Check(close(value(L"abs(x)", -5.0), 5.0), "abs");
+        Check(close(value(L"ln(e)", 0.0), 1.0), "ln and e");
+        Check(close(value(L"log(100)", 0.0), 2.0), "log base 10");
+        Check(close(value(L"sin(π/2)", 0.0), 1.0), "pi");
+        Check(close(value(L"x²", 5.0), 25.0), "superscript two");
+        Check(close(value(L"x³", 2.0), 8.0), "superscript three");
+        Check(close(value(L"sin⁻¹(1)", 0.0), 3.14159265358979323846 / 2.0), "keypad inverse form");
+        Check(close(value(L"asin(1)", 0.0), 3.14159265358979323846 / 2.0), "written inverse form");
+        Check(close(value(L"sin x", 0.0), 0.0), "unparenthesised argument");
+        Check(close(value(L"tanh(0)", 0.0), 0.0), "hyperbolic");
+        Check(close(value(L"1.5x", 2.0), 3.0), "decimal literal");
+        Check(close(value(L"x×2", 3.0), 6.0), "typographic multiplication sign");
+        Check(close(value(L"x÷2", 6.0), 3.0), "typographic division sign");
+        Check(close(value(L"x−4", 6.0), 2.0), "typographic minus sign");
+
+        // Undefined points come back as NaN, which the renderer breaks the
+        // curve at rather than drawing a line through.
+        Check(std::isnan(value(L"sqrt(x)", -1.0)), "sqrt of a negative is undefined");
+        Check(std::isnan(value(L"ln(x)", -1.0)), "ln of a negative is undefined");
+        Check(!std::isfinite(value(L"1/x", 0.0)), "1/x at the asymptote is not finite");
+
+        // Things that must not parse, rather than parse into something wrong.
+        Check(!parses(L""), "empty is rejected");
+        Check(!parses(L"   "), "blank is rejected");
+        Check(!parses(L"y="), "bare y= is rejected");
+        Check(!parses(L"x+"), "trailing operator is rejected");
+        Check(!parses(L"(x"), "unclosed group is rejected");
+        Check(!parses(L"x)"), "unopened group is rejected");
+        Check(!parses(L"sin()"), "empty call is rejected");
+        Check(!parses(L"|x"), "unclosed bars are rejected");
+        Check(!parses(L"@"), "unknown character is rejected");
+
+        // A compiled expression samples cleanly across a range, which is what
+        // the renderer does a few hundred times per frame.
+        {
+            Graphing::Expression expression;
+            Check(expression.Compile(L"sin(x)/x"), "compiles a quotient");
+            int finite = 0;
+            for (int i = -200; i <= 200; ++i)
+            {
+                const double x = static_cast<double>(i) * 0.05;
+                if (std::isfinite(expression.Evaluate(x)))
+                {
+                    ++finite;
+                }
+            }
+            Check(finite >= 395, "sin(x)/x is finite away from the origin");
+        }
+
+        Graphing::Expression cleared;
+        Check(cleared.Empty(), "a fresh expression is empty");
+        Check(cleared.Compile(L"x") && !cleared.Empty(), "compiling fills it");
+        cleared.Clear();
+        Check(cleared.Empty(), "Clear empties it");
+    }
+}
+
 int main()
 {
     std::cout << "CalcManager compact-build tests\n\n";
@@ -767,6 +867,7 @@ int main()
     TestOperatorNames();
     TestConverter();
     TestDateCalculation();
+    TestGraphing();
     TestExactFixedPoint();
     TestRandom();
 

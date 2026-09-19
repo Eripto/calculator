@@ -19,6 +19,7 @@ drawing, which is where the size saving comes from.
 | --- | --- |
 | Standard | Full keypad, `%`, `1/x`, `x²`, `²√x`, `+/−` |
 | Scientific | Full keypad, `2ⁿᵈ` inverse toggle, DEG/RAD/GRAD, `F-E`, trig (including the hyperbolic functions) and function flyouts, parentheses with open-paren counter |
+| Graphing | Plots y = f(x): multiple equations in the shipping colour palette, pan, zoom and reset, a graphing keypad, and the trig and function flyouts writing into the equation |
 | Programmer | HEX/DEC/OCT/BIN readouts, radix switching, QWORD/DWORD/WORD/BYTE, bitwise and bit-shift flyouts, 64-bit bit-flip board, A–F keys with radix-aware enabling |
 | Date Calculation | Difference between dates, and add/subtract years-months-days, with a calendar flyout on each date field |
 | Converter | All 12 unit categories — Volume, Length, Weight and mass, Temperature, Energy, Area, Speed, Time, Power, Data, Pressure, Angle — 158 units, the whimsical units, and the "About equal to" suggestions |
@@ -29,11 +30,14 @@ drawing, which is where the size saving comes from.
 
 ### Not included, and why
 
-- **Graphing.** It cannot be built from this repository. `src/GraphingImpl`
-  contains only `MockGraphingImpl` — a stub whose `MathSolver` returns an empty
-  graph. The real equation solver and renderer are a closed-source component
-  Microsoft ships separately, so any build from this source has a non-functional
-  graphing mode.
+- **Graphing's solver.** `src/GraphingImpl` contains only `MockGraphingImpl`,
+  a stub whose `MathSolver` returns an empty graph; the real equation solver and
+  renderer are a closed-source component Microsoft ships separately. So there
+  was nothing to port, and the parsing, evaluation and plotting here are written
+  rather than ported — see **Graphing** below. What that costs is the analysis
+  the real solver backs: the key graph features panel (zeroes, extrema,
+  asymptotes, period), implicit relations such as `x² + y² = 9`, and
+  inequalities. What is here plots explicit functions of x.
 - **Currency.** Also not functional in this repository:
   `Calculator.ViewModels/DataLoaders/CurrencyHttpClient.cs` states that the
   upstream rate endpoints are dead and substitutes placeholder data (fictional
@@ -125,9 +129,9 @@ run with the host compiler — no Windows and no cross-compiler required:
 ./tests/run_tests.sh
 ```
 
-130 checks covering arithmetic, scientific functions, programmer radices,
-memory, history, unit conversions across every category, date arithmetic, and
-error handling. Two of them are differential tests against a reference
+175 checks covering arithmetic, scientific functions, programmer radices,
+memory, history, unit conversions across every category, date arithmetic,
+expression parsing for the graphing mode, and error handling. Two of them are differential tests against a reference
 implementation rather than fixed expectations:
 
 - the decimal parser that replaced `std::wregex` is checked against that regex
@@ -162,6 +166,35 @@ mingw-w64 (`binds_to_current_def_p`); `-fno-asynchronous-unwind-tables` makes
 GCC fall back to SjLj exceptions, which mingw does not provide; and a 32-bit
 build is larger, because its DWARF exception tables outweigh the smaller
 pointers.
+
+## Graphing
+
+The shipping app hands each equation to `Graphing::IMathSolver`, which this
+repository does not contain. What it does contain, and what this mode follows,
+is the shape of the feature: the function set in `GraphingNumPad.xaml`, the
+fourteen equation colours in `App.xaml` (both theme variants), and the
+`NavCategory.cs` placement, glyph and keyboard shortcut.
+
+Expressions compile to a flat postfix program rather than a node tree — no
+per-node allocation and a good deal less code — and evaluate over doubles with
+a fixed stack. The grammar covers implicit multiplication (`2x`, `3sin(x)`,
+`(x+1)(x-1)`), right-associative `^`, absolute-value bars, unparenthesised
+function arguments, the superscript forms the keypads produce (`x²`, `sin⁻¹`),
+and `π` and `e`. A leading `y=` is stripped. Anything that does not parse
+leaves the curve undrawn rather than guessing at what was meant.
+
+Undefined points come back as NaN and break the curve, so `sqrt(x)` simply
+stops at the origin; a jump larger than four times the view height breaks it
+too, which is what keeps the two branches of `1/x` from being joined by a line
+through the asymptote. Curves are sampled once per pixel column.
+
+Pan by dragging the plot, zoom with the wheel or the three buttons in the
+corner. Equations are typed directly or entered from the keypad, and the
+Trigonometry and Function flyouts — shared with the scientific keypad — write
+their function into the equation here instead of sending a command to the
+engine.
+
+The whole mode costs 25 KB of the binary.
 
 ## Memory
 

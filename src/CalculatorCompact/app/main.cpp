@@ -27,6 +27,7 @@
 
 #include "CalculatorManager.h"
 #include "ConverterModel.h"
+#include "GraphModel.h"
 #include "DateCalcModel.h"
 #include "ConverterData.generated.h"
 #include "CalculatorResource.h"
@@ -482,6 +483,7 @@ namespace
     {
         Standard,
         Scientific,
+        Graphing,
         Programmer,
         Date,
         Converter
@@ -535,6 +537,14 @@ namespace
         ACT_RADIX_OCT,
         ACT_RADIX_BIN,
         ACT_MODE_DATE,
+        ACT_MODE_GRAPHING,
+        ACT_GRAPH_ZOOM_IN,
+        ACT_GRAPH_ZOOM_OUT,
+        ACT_GRAPH_RESET,
+        ACT_GRAPH_ADD,
+        ACT_GRAPH_BACKSPACE,
+        ACT_GRAPH_CLEAR,
+        ACT_GRAPH_NEGATE,
         ACT_ALWAYS_ON_TOP,
         ACT_APP_THEME,
         ACT_SETTINGS,
@@ -553,8 +563,10 @@ namespace
         ACT_THEME_LIGHT,
         ACT_THEME_DARK,
         ACT_THEME_SYSTEM,
-        // Ranged actions carry an index in their low digits; Execute() tests them
-        // from the highest base down, so the ranges must not overlap.
+        // Ranged actions carry an index in their low digits. Execute() tests them
+        // from the highest base down, so the ranges must not overlap AND the
+        // tests must stay in descending order -- a lower base tested first
+        // swallows every action above it.
         ACT_BIT_BASE = 2000,       // + bit index 0..63
         ACT_MEM_LOAD_BASE = 3000,  // + memory slot
         ACT_MEM_CLEAR_BASE = 3200, // + memory slot
@@ -574,6 +586,9 @@ namespace
         ACT_CAL_PREV = 20000,
         ACT_CAL_NEXT,
         ACT_CAL_DAY_BASE = 20100, // + day of month
+        ACT_GRAPH_SELECT_BASE = 21000, // + equation index
+        ACT_GRAPH_REMOVE_BASE = 21100, // + equation index
+        ACT_GRAPH_TEXT_BASE = 21200,   // + index into the keypad's character table
     };
 
     static_assert(ACT_MEM_SUB < ACT_BIT_BASE, "scalar actions must stay below the ranged actions");
@@ -600,6 +615,10 @@ namespace
         VIcon_RadioOff,
         VIcon_Palette,
         VIcon_Calculator,
+        VIcon_ZoomIn,
+        VIcon_ZoomOut,
+        VIcon_ZoomReset,
+        VIcon_Plus,
         VIcon_Close,
     };
 
@@ -977,6 +996,9 @@ namespace
                 m_manager->SendCommand(m_wordSize);
                 ApplyRadix();
                 break;
+            case Mode::Graphing:
+                EnsureGraphing();
+                break;
             case Mode::Date:
                 break;
             case Mode::Converter:
@@ -991,12 +1013,81 @@ namespace
             Relayout();
         }
 
+        void EnsureGraphing()
+        {
+            if (m_equations.empty())
+            {
+                m_equations.push_back(GraphEquation{});
+                m_activeEquation = 0;
+            }
+        }
+
+        void AppendToEquation(wchar_t c)
+        {
+            if (c == L'\0')
+            {
+                return;
+            }
+            EnsureGraphing();
+            m_equations[m_activeEquation].text.push_back(c);
+            RecompileEquation(m_activeEquation);
+        }
+
+        void BackspaceEquation()
+        {
+            EnsureGraphing();
+            std::wstring& text = m_equations[m_activeEquation].text;
+            if (!text.empty())
+            {
+                text.pop_back();
+            }
+            RecompileEquation(m_activeEquation);
+        }
+
+        void RecompileEquation(int index)
+        {
+            if (index < 0 || index >= static_cast<int>(m_equations.size()))
+            {
+                return;
+            }
+            GraphEquation& equation = m_equations[index];
+            equation.valid = equation.expression.Compile(equation.text);
+        }
+
+        // Zooms about the centre of the view, as the zoom buttons do.
+        void ScaleGraph(double factor)
+        {
+            const double centreX = (m_graphXMin + m_graphXMax) * 0.5;
+            const double centreY = (m_graphYMin + m_graphYMax) * 0.5;
+            const double halfX = (m_graphXMax - m_graphXMin) * 0.5 * factor;
+            const double halfY = (m_graphYMax - m_graphYMin) * 0.5 * factor;
+            // Stop short of the range where the tick arithmetic loses meaning.
+            if (halfX < 1e-6 || halfX > 1e6)
+            {
+                return;
+            }
+            m_graphXMin = centreX - halfX;
+            m_graphXMax = centreX + halfX;
+            m_graphYMin = centreY - halfY;
+            m_graphYMax = centreY + halfY;
+        }
+
+        void ResetGraph()
+        {
+            m_graphXMin = -10.0;
+            m_graphXMax = 10.0;
+            m_graphYMin = -10.0;
+            m_graphYMax = 10.0;
+        }
+
         std::wstring_view ModeName() const
         {
             switch (m_mode)
             {
             case Mode::Scientific:
                 return L"Scientific";
+            case Mode::Graphing:
+                return L"Graphing";
             case Mode::Programmer:
                 return L"Programmer";
             case Mode::Date:
@@ -1262,6 +1353,31 @@ namespace
         RECT m_exprRect{};
         RECT m_titleRect{};
         int m_navPaneWidth = 0;
+
+        // ---------------------------------------------------------- graphing
+        struct GraphEquation
+        {
+            std::wstring text;
+            Graphing::Expression expression;
+            int colour = 0;   // index into the equation palette
+            bool visible = true;
+            bool valid = false;
+        };
+
+        std::vector<GraphEquation> m_equations;
+        int m_activeEquation = 0;
+        // The view window. The shipping app opens on a symmetric range and
+        // keeps the axes square, which is what makes a circle look round.
+        double m_graphXMin = -10.0;
+        double m_graphXMax = 10.0;
+        double m_graphYMin = -10.0;
+        double m_graphYMax = 10.0;
+        RECT m_graphRect{};
+        RECT m_graphEquationRect{};
+        bool m_graphDragging = false;
+        POINT m_graphDragFrom{};
+        double m_graphDragXMin = 0.0;
+        double m_graphDragYMin = 0.0;
         RECT m_settingsAppearanceRect{};
         RECT m_settingsAboutRect{};
         RECT m_settingsThemePanel{};
@@ -1309,6 +1425,7 @@ namespace
         void AddGrid(const KeyDef* keys, size_t count, int cols, int rows, RECT area);
         void BuildConverterLayout(int contentRight, int height, int y);
         void BuildDateLayout(int contentRight, int height, int y);
+        void BuildGraphingLayout(int contentRight, int height, int y);
         void BuildNavLayout(int width, int height);
         void BuildSettingsLayout(int width, int height);
 
@@ -1494,11 +1611,15 @@ namespace
         }
         y += navH;
 
-        if (m_mode == Mode::Converter || m_mode == Mode::Date)
+        if (m_mode == Mode::Converter || m_mode == Mode::Date || m_mode == Mode::Graphing)
         {
             if (m_mode == Mode::Converter)
             {
                 BuildConverterLayout(contentRight, height, y);
+            }
+            else if (m_mode == Mode::Graphing)
+            {
+                BuildGraphingLayout(contentRight, height, y);
             }
             else
             {
@@ -2367,6 +2488,29 @@ namespace
             g.DrawLine(&pen, P(11.8f, 4.2f), P(4.2f, 11.8f));
             break;
 
+        case VIcon_ZoomIn:
+        case VIcon_ZoomOut:
+            g.DrawEllipse(&pen, ox + 2.2f * s, oy + 2.2f * s, 9.2f * s, 9.2f * s);
+            g.DrawLine(&pen, P(11.0f, 11.0f), P(14.0f, 14.0f));
+            g.DrawLine(&pen, P(4.4f, 6.8f), P(9.2f, 6.8f));
+            if (id == VIcon_ZoomIn)
+            {
+                g.DrawLine(&pen, P(6.8f, 4.4f), P(6.8f, 9.2f));
+            }
+            break;
+
+        case VIcon_ZoomReset:
+            // Reset view: a frame with arrows pushing out to its corners.
+            g.DrawRectangle(&pen, Gdiplus::RectF(ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s));
+            g.DrawLine(&pen, P(6.0f, 6.0f), P(10.0f, 10.0f));
+            g.DrawLine(&pen, P(10.0f, 6.0f), P(6.0f, 10.0f));
+            break;
+
+        case VIcon_Plus:
+            g.DrawLine(&pen, P(8.0f, 3.5f), P(8.0f, 12.5f));
+            g.DrawLine(&pen, P(3.5f, 8.0f), P(12.5f, 8.0f));
+            break;
+
         case VIcon_RadioOff:
             g.DrawEllipse(&pen, ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s);
             break;
@@ -2522,6 +2666,54 @@ namespace
     }
 
 
+    // EquationBrush1..14 from App.xaml, in both theme variants. The shipping
+    // app hands these out in order as equations are added.
+    COLORREF EquationColour(int index)
+    {
+        static constexpr COLORREF light[] = {
+            RGB(0x00, 0x63, 0xB1), RGB(0x00, 0xB7, 0xC3), RGB(0x66, 0x00, 0xCC), RGB(0x10, 0x7C, 0x10),
+            RGB(0x00, 0xCC, 0x6A), RGB(0x00, 0x80, 0x55), RGB(0x58, 0x59, 0x5B), RGB(0xE8, 0x11, 0x23),
+            RGB(0xE3, 0x00, 0x8C), RGB(0xB3, 0x15, 0x64), RGB(0xFF, 0xB9, 0x00), RGB(0xF7, 0x63, 0x0C),
+            RGB(0x8E, 0x56, 0x2E), RGB(0x00, 0x00, 0x00),
+        };
+        static constexpr COLORREF dark[] = {
+            RGB(0x4D, 0x92, 0xC8), RGB(0x4D, 0xCD, 0xD5), RGB(0xA3, 0x66, 0xE0), RGB(0x58, 0xA3, 0x58),
+            RGB(0x4D, 0xDB, 0x97), RGB(0x4D, 0xA6, 0x88), RGB(0x8A, 0x8B, 0x8C), RGB(0xEF, 0x58, 0x65),
+            RGB(0xEB, 0x4D, 0xAF), RGB(0xCA, 0x5B, 0x93), RGB(0xFF, 0xCE, 0x4D), RGB(0xF9, 0x92, 0x55),
+            RGB(0xB0, 0x89, 0x6D), RGB(0xFF, 0xFF, 0xFF),
+        };
+        constexpr int count = static_cast<int>(sizeof(light) / sizeof(light[0]));
+        const int slot = ((index % count) + count) % count;
+        return g_theme.dark ? dark[slot] : light[slot];
+    }
+
+    // The step between gridlines: 1, 2 or 5 times a power of ten, whichever
+    // puts roughly the requested number of lines across the range.
+    double GridStep(double range, int target)
+    {
+        if (range <= 0.0 || target <= 0)
+        {
+            return 1.0;
+        }
+        const double rough = range / static_cast<double>(target);
+        const double magnitude = std::pow(10.0, std::floor(std::log10(rough)));
+        const double normalised = rough / magnitude;
+        double step = 10.0;
+        if (normalised < 1.5)
+        {
+            step = 1.0;
+        }
+        else if (normalised < 3.5)
+        {
+            step = 2.0;
+        }
+        else if (normalised < 7.5)
+        {
+            step = 5.0;
+        }
+        return step * magnitude;
+    }
+
     // Caption above a field, in the app's small secondary style.
     void DrawCaption(HDC hdc, RECT rc, std::wstring_view text)
     {
@@ -2565,6 +2757,303 @@ namespace
             text += L' ';
             text += suggestions[i].abbreviation;
             DrawLabel(hdc, cell, text, 12, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+    }
+
+    // Formats a tick label: enough decimals for the step in use, no trailing
+    // zeros, and a real minus sign.
+    std::wstring TickLabel(double value, double step)
+    {
+        int decimals = 0;
+        double scaled = step;
+        while (scaled < 1.0 && decimals < 6)
+        {
+            scaled *= 10.0;
+            ++decimals;
+        }
+        // Snap away the error that repeated addition of the step leaves behind.
+        if (std::fabs(value) < step * 0.5)
+        {
+            value = 0.0;
+        }
+        std::wstring text = CalcEngine::NumericString::FixedPoint(value, decimals);
+        if (decimals > 0)
+        {
+            while (!text.empty() && text.back() == L'0')
+            {
+                text.pop_back();
+            }
+            if (!text.empty() && text.back() == L'.')
+            {
+                text.pop_back();
+            }
+        }
+        for (wchar_t& c : text)
+        {
+            if (c == L'-')
+            {
+                c = 0x2212;
+            }
+        }
+        return text;
+    }
+
+    // The plot itself, drawn before the buttons so the zoom controls sit on
+    // top of it rather than under it.
+    // The text a shared flyout command contributes to an equation. Anything the
+    // plotter has no meaning for -- rand, dms, degrees -- returns nullptr and is
+    // ignored rather than written in as something that will not parse.
+    const wchar_t* GraphingFunctionName(Command command)
+    {
+        switch (command)
+        {
+        case Command::CommandSIN: return L"sin(";
+        case Command::CommandCOS: return L"cos(";
+        case Command::CommandTAN: return L"tan(";
+        case Command::CommandSEC: return L"sec(";
+        case Command::CommandCSC: return L"csc(";
+        case Command::CommandCOT: return L"cot(";
+        case Command::CommandASIN: return L"asin(";
+        case Command::CommandACOS: return L"acos(";
+        case Command::CommandATAN: return L"atan(";
+        case Command::CommandASEC: return L"asec(";
+        case Command::CommandACSC: return L"acsc(";
+        case Command::CommandACOT: return L"acot(";
+        case Command::CommandSINH: return L"sinh(";
+        case Command::CommandCOSH: return L"cosh(";
+        case Command::CommandTANH: return L"tanh(";
+        case Command::CommandSECH: return L"sech(";
+        case Command::CommandCSCH: return L"csch(";
+        case Command::CommandCOTH: return L"coth(";
+        case Command::CommandASINH: return L"asinh(";
+        case Command::CommandACOSH: return L"acosh(";
+        case Command::CommandATANH: return L"atanh(";
+        case Command::CommandAbs: return L"abs(";
+        case Command::CommandLOG: return L"log(";
+        case Command::CommandLN: return L"ln(";
+        case Command::CommandSQRT: return L"sqrt(";
+        case Command::CommandCUBEROOT: return L"cbrt(";
+        default: return nullptr;
+        }
+    }
+
+    void PaintGraphPlot(HDC hdc, CalcApp& app)
+    {
+        const RECT& plot = app.m_graphRect;
+        const int width = plot.right - plot.left;
+        const int height = plot.bottom - plot.top;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        const double xMin = app.m_graphXMin;
+        const double xMax = app.m_graphXMax;
+        const double yMin = app.m_graphYMin;
+        const double yMax = app.m_graphYMax;
+        const double xSpan = xMax - xMin;
+        const double ySpan = yMax - yMin;
+        if (xSpan <= 0.0 || ySpan <= 0.0)
+        {
+            return;
+        }
+
+        const auto toScreenX = [&](double x) {
+            return static_cast<double>(plot.left) + (x - xMin) / xSpan * static_cast<double>(width);
+        };
+        const auto toScreenY = [&](double y) {
+            return static_cast<double>(plot.bottom) - (y - yMin) / ySpan * static_cast<double>(height);
+        };
+
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        // Surface, clipped so nothing can spill into the equation list.
+        FillRounded(g, plot, Dp(4), g_theme.card);
+        g.SetClip(Gdiplus::Rect(plot.left, plot.top, width, height));
+
+        const double xStep = GridStep(xSpan, 8);
+        const double yStep = GridStep(ySpan, 8);
+
+        // Gridlines.
+        {
+            Gdiplus::Pen grid(ToGp(g_theme.divider));
+            for (double x = std::ceil(xMin / xStep) * xStep; x <= xMax; x += xStep)
+            {
+                const auto sx = static_cast<Gdiplus::REAL>(toScreenX(x));
+                g.DrawLine(&grid, sx, static_cast<Gdiplus::REAL>(plot.top), sx, static_cast<Gdiplus::REAL>(plot.bottom));
+            }
+            for (double y = std::ceil(yMin / yStep) * yStep; y <= yMax; y += yStep)
+            {
+                const auto sy = static_cast<Gdiplus::REAL>(toScreenY(y));
+                g.DrawLine(&grid, static_cast<Gdiplus::REAL>(plot.left), sy, static_cast<Gdiplus::REAL>(plot.right), sy);
+            }
+        }
+
+        // Axes, drawn heavier than the grid.
+        {
+            Gdiplus::Pen axis(ToGp(g_theme.secondaryText), 1.4f);
+            if (xMin <= 0.0 && xMax >= 0.0)
+            {
+                const auto sx = static_cast<Gdiplus::REAL>(toScreenX(0.0));
+                g.DrawLine(&axis, sx, static_cast<Gdiplus::REAL>(plot.top), sx, static_cast<Gdiplus::REAL>(plot.bottom));
+            }
+            if (yMin <= 0.0 && yMax >= 0.0)
+            {
+                const auto sy = static_cast<Gdiplus::REAL>(toScreenY(0.0));
+                g.DrawLine(&axis, static_cast<Gdiplus::REAL>(plot.left), sy, static_cast<Gdiplus::REAL>(plot.right), sy);
+            }
+        }
+
+        // The curves. One sample per pixel column, with the polyline broken
+        // wherever the function is undefined or jumps the way it does either
+        // side of an asymptote.
+        {
+            std::vector<Gdiplus::PointF> points;
+            points.reserve(static_cast<size_t>(width) + 2);
+            const double breakThreshold = ySpan * 4.0;
+
+            for (const auto& equation : app.m_equations)
+            {
+                if (!equation.visible || !equation.valid || equation.expression.Empty())
+                {
+                    continue;
+                }
+                Gdiplus::Pen curve(ToGp(EquationColour(equation.colour)), 2.0f);
+                curve.SetLineJoin(Gdiplus::LineJoinRound);
+
+                points.clear();
+                double previous = 0.0;
+                bool havePrevious = false;
+
+                for (int px = 0; px <= width; ++px)
+                {
+                    const double x = xMin + xSpan * static_cast<double>(px) / static_cast<double>(width);
+                    const double y = equation.expression.Evaluate(x);
+
+                    const bool usable = std::isfinite(y);
+                    const bool jumped = havePrevious && std::fabs(y - previous) > breakThreshold;
+                    if (!usable || jumped)
+                    {
+                        if (points.size() > 1)
+                        {
+                            g.DrawLines(&curve, points.data(), static_cast<INT>(points.size()));
+                        }
+                        points.clear();
+                        havePrevious = usable;
+                        previous = y;
+                        if (!usable)
+                        {
+                            continue;
+                        }
+                    }
+
+                    // Clamp far off-screen values rather than drop them, so a
+                    // steep curve still enters and leaves the view correctly.
+                    const double clamped = (std::min)((std::max)(y, yMin - ySpan), yMax + ySpan);
+                    points.push_back(Gdiplus::PointF(
+                        static_cast<Gdiplus::REAL>(toScreenX(x)), static_cast<Gdiplus::REAL>(toScreenY(clamped))));
+                    previous = y;
+                    havePrevious = true;
+                }
+                if (points.size() > 1)
+                {
+                    g.DrawLines(&curve, points.data(), static_cast<INT>(points.size()));
+                }
+            }
+        }
+
+        g.ResetClip();
+
+        // Tick labels, along the axes where they are on screen and along the
+        // edges where they are not.
+        {
+            const double axisY = (yMin <= 0.0 && yMax >= 0.0) ? 0.0 : ((yMin > 0.0) ? yMin : yMax);
+            const double axisX = (xMin <= 0.0 && xMax >= 0.0) ? 0.0 : ((xMin > 0.0) ? xMin : xMax);
+            const int baseY = static_cast<int>(toScreenY(axisY));
+            const int baseX = static_cast<int>(toScreenX(axisX));
+
+            for (double x = std::ceil(xMin / xStep) * xStep; x <= xMax; x += xStep)
+            {
+                if (std::fabs(x) < xStep * 0.5 && std::fabs(axisX) < xStep * 0.5)
+                {
+                    continue; // the origin is labelled once, on the y axis
+                }
+                const int sx = static_cast<int>(toScreenX(x));
+                if (sx < plot.left + Dp(14) || sx > plot.right - Dp(14))
+                {
+                    continue; // would be clipped by the edge of the plot
+                }
+                RECT label{ sx - Dp(22), (std::min)(baseY + Dp(2), static_cast<int>(plot.bottom) - Dp(16)),
+                            sx + Dp(22), (std::min)(baseY + Dp(16), static_cast<int>(plot.bottom)) };
+                DrawLabel(hdc, label, TickLabel(x, xStep), 10, g_theme.secondaryText, false,
+                          DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOCLIP);
+            }
+            for (double y = std::ceil(yMin / yStep) * yStep; y <= yMax; y += yStep)
+            {
+                const int sy = static_cast<int>(toScreenY(y));
+                if (sy < plot.top + Dp(8) || sy > plot.bottom - Dp(8))
+                {
+                    continue;
+                }
+                RECT label{ (std::max)(baseX - Dp(46), static_cast<int>(plot.left)), sy - Dp(8),
+                            (std::max)(baseX - Dp(4), static_cast<int>(plot.left) + Dp(42)), sy + Dp(8) };
+                DrawLabel(hdc, label, TickLabel(y, yStep), 10, g_theme.secondaryText, false,
+                          DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOCLIP);
+            }
+        }
+
+    }
+
+    // The equation list, drawn after the rows' own hover fills.
+    void PaintGraphing(HDC hdc, CalcApp& app)
+    {
+        // Equation rows: a colour swatch, the equation, and the caret on the
+        // row being edited.
+        for (size_t i = 0; i < app.m_equations.size(); ++i)
+        {
+            const auto& equation = app.m_equations[i];
+            const int action = ACT_GRAPH_SELECT_BASE + static_cast<int>(i);
+            const Btn* row = nullptr;
+            for (const Btn& candidate : app.m_buttons)
+            {
+                if (candidate.action == action)
+                {
+                    row = &candidate;
+                    break;
+                }
+            }
+            if (row == nullptr)
+            {
+                continue;
+            }
+
+            const COLORREF colour = EquationColour(equation.colour);
+            const int centre = (row->rc.top + row->rc.bottom) / 2;
+            RECT swatch{ row->rc.left + Dp(6), centre - Dp(9), row->rc.left + Dp(10), centre + Dp(9) };
+            HBRUSH brush = CreateSolidBrush(colour);
+            FillRect(hdc, &swatch, brush);
+            DeleteObject(brush);
+
+            RECT text{ row->rc.left + Dp(20), row->rc.top, row->rc.right - Dp(6), row->rc.bottom };
+            const bool active = (static_cast<int>(i) == app.m_activeEquation);
+            if (equation.text.empty())
+            {
+                DrawLabel(hdc, text, L"Enter an equation", 14, g_theme.disabledText, false,
+                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            else
+            {
+                std::wstring shown = L"y = ";
+                shown += equation.text;
+                if (active)
+                {
+                    shown += L"|"; // the caret, on the row being typed into
+                }
+                DrawLabel(hdc, text, shown, 14,
+                          equation.valid ? g_theme.primaryText : g_theme.disabledText, false,
+                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
         }
     }
 
@@ -3056,6 +3545,11 @@ namespace
 
         SetBkMode(hdc, TRANSPARENT);
 
+        if (app.m_mode == Mode::Graphing)
+        {
+            PaintGraphPlot(hdc, app);
+        }
+
         // --- shapes -------------------------------------------------------
         {
             Gdiplus::Graphics g(hdc);
@@ -3065,6 +3559,7 @@ namespace
             {
                 FillRounded(g, app.m_panelRect, Dp(8), g_theme.card);
             }
+
 
             for (size_t i = 0; i < app.m_buttons.size(); ++i)
             {
@@ -3096,7 +3591,14 @@ namespace
                 float hot = 0.0f;
                 float pressed = 0.0f;
                 ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
-                DrawVectorIcon(g, PressedRect(b.rc, pressed), id, ButtonText(b), (b.textDip > 0) ? b.textDip : 16);
+                RECT box = PressedRect(b.rc, pressed);
+                if (b.leftAlign)
+                {
+                    // A row with both an icon and a label puts the icon in the
+                    // leading box the label is indented past.
+                    box = RECT{ box.left + Dp(8), box.top, box.left + Dp(36), box.bottom };
+                }
+                DrawVectorIcon(g, box, id, ButtonText(b), (b.textDip > 0) ? b.textDip : 16);
             }
         }
 
@@ -3104,7 +3606,7 @@ namespace
         for (size_t i = 0; i < app.m_buttons.size(); ++i)
         {
             const Btn& b = app.m_buttons[i];
-            const bool iconOnly = (b.style != Style::Card && !b.radio)
+            const bool iconOnly = (b.style != Style::Card && !b.radio && !b.leftAlign)
                 && (b.vicon != VIcon_None || VIconForGlyph(b.label) != VIcon_None);
             if (b.label.empty() || iconOnly)
             {
@@ -3170,6 +3672,10 @@ namespace
         if (app.m_mode == Mode::Converter)
         {
             PaintConverter(hdc, app);
+        }
+        else if (app.m_mode == Mode::Graphing)
+        {
+            PaintGraphing(hdc, app);
         }
         else if (app.m_mode == Mode::Date)
         {
@@ -3833,6 +4339,21 @@ namespace
         if (action >= kCommandBase)
         {
             const Command command = static_cast<Command>(action - kCommandBase);
+            if (app.m_mode == Mode::Graphing)
+            {
+                // The trig and function flyouts are shared with the scientific
+                // keypad, so in graphing mode their commands are written into
+                // the equation instead of being sent to the engine.
+                if (const wchar_t* name = GraphingFunctionName(command); name != nullptr)
+                {
+                    for (const wchar_t* c = name; *c != L'\0'; ++c)
+                    {
+                        app.AppendToEquation(*c);
+                    }
+                }
+                app.Relayout();
+                return;
+            }
             if (app.m_mode == Mode::Converter)
             {
                 app.EnsureConverter();
@@ -3845,6 +4366,77 @@ namespace
             return;
         }
 
+        if (action >= ACT_GRAPH_TEXT_BASE)
+        {
+            // The keypad's characters, indexed the way BuildGraphingLayout
+            // numbers them.
+            static constexpr wchar_t kCharacters[] = {
+                L'x',  L'(', L')', L'^',                 // row 1, backspace aside
+                L'7',  L'8', L'9', 0x00F7, 0x03C0,       // row 2
+                L'4',  L'5', L'6', 0x00D7, L'e',         // row 3
+                L'1',  L'2', L'3', 0x2212, L'|',         // row 4
+                L'0',  L'.', L'+',                       // row 5, +/- and C aside
+            };
+            const int index = action - ACT_GRAPH_TEXT_BASE;
+            if (index >= 0 && index < static_cast<int>(sizeof(kCharacters) / sizeof(kCharacters[0])))
+            {
+                app.AppendToEquation(kCharacters[index]);
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_GRAPH_REMOVE_BASE)
+        {
+            const int index = action - ACT_GRAPH_REMOVE_BASE;
+            if (index >= 0 && index < static_cast<int>(app.m_equations.size()))
+            {
+                if (app.m_equations.size() == 1)
+                {
+                    // The list always keeps one row; emptying it is the same as
+                    // removing the only equation.
+                    app.m_equations[0].text.clear();
+                    app.m_equations[0].expression.Clear();
+                    app.m_equations[0].valid = false;
+                }
+                else
+                {
+                    app.m_equations.erase(app.m_equations.begin() + index);
+                    if (app.m_activeEquation >= static_cast<int>(app.m_equations.size()))
+                    {
+                        app.m_activeEquation = static_cast<int>(app.m_equations.size()) - 1;
+                    }
+                }
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_GRAPH_SELECT_BASE)
+        {
+            const int index = action - ACT_GRAPH_SELECT_BASE;
+            if (index >= 0 && index < static_cast<int>(app.m_equations.size()))
+            {
+                app.m_activeEquation = index;
+            }
+            app.Relayout();
+            return;
+        }
+        if (action >= ACT_CAL_DAY_BASE)
+        {
+            CivilDate& date = app.DateForIndex(app.m_calendarField);
+            date.year = app.m_calendarMonth.year;
+            date.month = app.m_calendarMonth.month;
+            date.day = action - ACT_CAL_DAY_BASE;
+            CloseMenus();
+            app.Relayout();
+            return;
+        }
+        if (action == ACT_CAL_PREV || action == ACT_CAL_NEXT)
+        {
+            app.m_calendarMonth = DateMath::AddMonths(app.m_calendarMonth, (action == ACT_CAL_NEXT) ? 1 : -1);
+            app.LayoutCalendar();
+            app.Invalidate();
+            return;
+        }
         if (action >= ACT_DATE_VALUE_BASE)
         {
             int value = action - ACT_DATE_VALUE_BASE;
@@ -3891,23 +4483,6 @@ namespace
                 }
             }
             app.Relayout();
-            return;
-        }
-        if (action >= ACT_CAL_DAY_BASE)
-        {
-            CivilDate& date = app.DateForIndex(app.m_calendarField);
-            date.year = app.m_calendarMonth.year;
-            date.month = app.m_calendarMonth.month;
-            date.day = action - ACT_CAL_DAY_BASE;
-            CloseMenus();
-            app.Relayout();
-            return;
-        }
-        if (action == ACT_CAL_PREV || action == ACT_CAL_NEXT)
-        {
-            app.m_calendarMonth = DateMath::AddMonths(app.m_calendarMonth, (action == ACT_CAL_NEXT) ? 1 : -1);
-            app.LayoutCalendar();
-            app.Invalidate();
             return;
         }
         if (action >= ACT_DATE_FIELD_BASE)
@@ -4038,6 +4613,44 @@ namespace
             break;
         case ACT_MODE_DATE:
             app.SetMode(Mode::Date);
+            break;
+        case ACT_MODE_GRAPHING:
+            app.SetMode(Mode::Graphing);
+            break;
+        case ACT_GRAPH_ZOOM_IN:
+            app.ScaleGraph(1.0 / 1.4);
+            app.Relayout();
+            break;
+        case ACT_GRAPH_ZOOM_OUT:
+            app.ScaleGraph(1.4);
+            app.Relayout();
+            break;
+        case ACT_GRAPH_RESET:
+            app.ResetGraph();
+            app.Relayout();
+            break;
+        case ACT_GRAPH_ADD:
+        {
+            CalcApp::GraphEquation added;
+            added.colour = static_cast<int>(app.m_equations.size());
+            app.m_equations.push_back(std::move(added));
+            app.m_activeEquation = static_cast<int>(app.m_equations.size()) - 1;
+            app.Relayout();
+            break;
+        }
+        case ACT_GRAPH_BACKSPACE:
+            app.BackspaceEquation();
+            app.Relayout();
+            break;
+        case ACT_GRAPH_CLEAR:
+            app.EnsureGraphing();
+            app.m_equations[app.m_activeEquation].text.clear();
+            app.RecompileEquation(app.m_activeEquation);
+            app.Relayout();
+            break;
+        case ACT_GRAPH_NEGATE:
+            app.AppendToEquation(L'-');
+            app.Relayout();
             break;
         case ACT_CONV_FIELD_FROM:
             app.EnsureConverter();
@@ -4386,9 +4999,12 @@ namespace
         {
             switch (vk)
             {
+            // Numbered as NavCategory.cs numbers them.
             case '1': return ACT_MODE_STANDARD;
             case '2': return ACT_MODE_SCIENTIFIC;
-            case '3': return ACT_MODE_PROGRAMMER;
+            case '3': return ACT_MODE_GRAPHING;
+            case '4': return ACT_MODE_PROGRAMMER;
+            case '5': return ACT_MODE_DATE;
             default: return ACT_NONE;
             }
         }
@@ -4555,6 +5171,27 @@ namespace
             TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd, 0 };
             TrackMouseEvent(&track);
 
+            if (app.m_graphDragging)
+            {
+                // Pan by however far the pointer has moved since the press,
+                // converted back into graph units.
+                const int width = app.m_graphRect.right - app.m_graphRect.left;
+                const int height = app.m_graphRect.bottom - app.m_graphRect.top;
+                if (width > 0 && height > 0)
+                {
+                    const double xSpan = app.m_graphXMax - app.m_graphXMin;
+                    const double ySpan = app.m_graphYMax - app.m_graphYMin;
+                    const double dx = static_cast<double>(pt.x - app.m_graphDragFrom.x) / width * xSpan;
+                    const double dy = static_cast<double>(pt.y - app.m_graphDragFrom.y) / height * ySpan;
+                    app.m_graphXMin = app.m_graphDragXMin - dx;
+                    app.m_graphXMax = app.m_graphXMin + xSpan;
+                    app.m_graphYMin = app.m_graphDragYMin + dy;
+                    app.m_graphYMax = app.m_graphYMin + ySpan;
+                    app.Relayout();
+                }
+                return 0;
+            }
+
             int hotMenu = -1;
             int hot = -1;
             int hotNav = -1;
@@ -4631,6 +5268,17 @@ namespace
                 app.m_pressed = HitTest(app.m_buttons, pt);
             }
 
+            // A press inside the plot that did not land on a zoom control starts
+            // a pan.
+            if (app.m_mode == Mode::Graphing && app.m_pressed < 0 && PtInRect(&app.m_graphRect, pt))
+            {
+                app.m_graphDragging = true;
+                app.m_graphDragFrom = pt;
+                app.m_graphDragXMin = app.m_graphXMin;
+                app.m_graphDragYMin = app.m_graphYMin;
+                SetCapture(hwnd);
+            }
+
             if (app.m_pressed >= 0 || app.m_pressedNav >= 0)
             {
                 app.m_pressAnim.Set(0.0f);
@@ -4644,6 +5292,13 @@ namespace
         case WM_LBUTTONUP:
         {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (app.m_graphDragging)
+            {
+                app.m_graphDragging = false;
+                ReleaseCapture();
+                app.Invalidate();
+                return 0;
+            }
             const int pressed = app.m_pressed;
             const int pressedNav = app.m_pressedNav;
             app.m_pressAnim.To(0.0f, kMotionFastMs, EaseStandard);
@@ -4690,6 +5345,11 @@ namespace
                 app.m_historyScroll -= delta;
                 app.Relayout();
             }
+            else if (app.m_mode == Mode::Graphing)
+            {
+                app.ScaleGraph((delta > 0) ? (1.0 / 1.15) : 1.15);
+                app.Relayout();
+            }
             return 0;
         }
 
@@ -4717,6 +5377,23 @@ namespace
         case WM_CHAR:
             if (!app.m_navOpen && !app.m_menuOpen && !app.m_settingsOpen)
             {
+                if (app.m_mode == Mode::Graphing)
+                {
+                    // The equation rows take typed text directly; the keypad is
+                    // a convenience, not the only way in.
+                    const auto c = static_cast<wchar_t>(wParam);
+                    if (c == L'\b')
+                    {
+                        app.BackspaceEquation();
+                        app.Relayout();
+                    }
+                    else if (c >= L' ')
+                    {
+                        app.AppendToEquation(c);
+                        app.Relayout();
+                    }
+                    return 0;
+                }
                 RunAction(hwnd, ActionForChar(static_cast<wchar_t>(wParam)));
             }
             return 0;
@@ -5025,6 +5702,152 @@ namespace
         }
     }
 
+    // Graphing: the plot on top, the equation list under it, and a keypad
+    // carrying the graphing numpad's function set.
+    void CalcApp::BuildGraphingLayout(int contentRight, int height, int y)
+    {
+        EnsureGraphing();
+        const int pad = Dp(kPadDip);
+        const int gap = Dp(kGapDip);
+
+        const int left = pad;
+        const int right = contentRight - pad;
+
+        // --- the plot, with its zoom controls in the trailing corner --------
+        const int plotHeight = (std::max)(Dp(140), (height - y) * 42 / 100);
+        m_graphRect = { left, y, right, y + plotHeight };
+
+        const auto zoomButton = [&](int action, int vicon, int index) {
+            Btn button;
+            button.action = action;
+            button.style = Style::Flat;
+            button.vicon = vicon;
+            button.textDip = 14;
+            const int size = Dp(30);
+            button.rc = { m_graphRect.right - Dp(6) - size, m_graphRect.top + Dp(6) + index * (size + Dp(4)),
+                          m_graphRect.right - Dp(6), m_graphRect.top + Dp(6) + index * (size + Dp(4)) + size };
+            m_buttons.push_back(button);
+        };
+        zoomButton(ACT_GRAPH_ZOOM_IN, VIcon_ZoomIn, 0);
+        zoomButton(ACT_GRAPH_ZOOM_OUT, VIcon_ZoomOut, 1);
+        zoomButton(ACT_GRAPH_RESET, VIcon_ZoomReset, 2);
+
+        y += plotHeight + Dp(6);
+
+        // --- equation rows --------------------------------------------------
+        const int rowHeight = Dp(34);
+        const int listTop = y;
+        int shown = 0;
+        for (size_t i = 0; i < m_equations.size(); ++i)
+        {
+            if (y + rowHeight > height - Dp(190))
+            {
+                break;
+            }
+            Btn row;
+            row.action = ACT_GRAPH_SELECT_BASE + static_cast<int>(i);
+            row.style = Style::Bit; // hover fill only, like a list row
+            row.textDip = 14;
+            row.checked = (static_cast<int>(i) == m_activeEquation);
+            row.rc = { left, y, right - Dp(34), y + rowHeight - Dp(2) };
+            m_buttons.push_back(row);
+
+            Btn remove;
+            remove.action = ACT_GRAPH_REMOVE_BASE + static_cast<int>(i);
+            remove.style = Style::Flat;
+            remove.vicon = VIcon_Close;
+            remove.textDip = 12;
+            remove.rc = { right - Dp(32), y, right, y + rowHeight - Dp(2) };
+            m_buttons.push_back(remove);
+
+            y += rowHeight;
+            ++shown;
+        }
+        m_graphEquationRect = { left, listTop, right, y };
+
+        if (shown == static_cast<int>(m_equations.size()) && y + rowHeight <= height - Dp(190))
+        {
+            Btn add;
+            add.label = L"Add equation";
+            add.action = ACT_GRAPH_ADD;
+            add.style = Style::Bit;
+            add.textDip = 13;
+            add.leftAlign = true;
+            add.vicon = VIcon_Plus;
+            add.rc = { left, y, right, y + rowHeight - Dp(2) };
+            m_buttons.push_back(add);
+            y += rowHeight;
+        }
+
+        // --- keypad ---------------------------------------------------------
+        y += Dp(4);
+        RECT keypad{ pad, y, contentRight - pad, height - pad };
+
+        // Trigonometry and Function dropdowns, as the scientific keypad has.
+        const int controlHeight = Dp(30);
+        Btn trig;
+        trig.label = L"Trigonometry ";
+        trig.action = ACT_TRIG_MENU;
+        trig.style = Style::Flat;
+        trig.textDip = 12;
+        trig.rc = { keypad.left + gap, keypad.top, (keypad.left + keypad.right) / 2 - gap, keypad.top + controlHeight };
+        m_buttons.push_back(trig);
+
+        Btn func;
+        func.label = L"Function ";
+        func.action = ACT_FUNC_MENU;
+        func.style = Style::Flat;
+        func.textDip = 12;
+        func.rc = { (keypad.left + keypad.right) / 2 + gap, keypad.top, keypad.right - gap, keypad.top + controlHeight };
+        m_buttons.push_back(func);
+
+        keypad.top += controlHeight + Dp(2);
+
+        // Five columns: the scientific digits plus a column of the symbols an
+        // equation needs.
+        struct GraphKey
+        {
+            const wchar_t* label;
+            int action;
+            Style style;
+        };
+        static constexpr GraphKey keys[5][5] = {
+            { { L"x", ACT_GRAPH_TEXT_BASE + 0, Style::Operator }, { L"(", ACT_GRAPH_TEXT_BASE + 1, Style::Operator },
+              { L")", ACT_GRAPH_TEXT_BASE + 2, Style::Operator }, { L"^", ACT_GRAPH_TEXT_BASE + 3, Style::Operator },
+              { L"", ACT_GRAPH_BACKSPACE, Style::Operator } },
+            { { L"7", ACT_GRAPH_TEXT_BASE + 4, Style::Number }, { L"8", ACT_GRAPH_TEXT_BASE + 5, Style::Number },
+              { L"9", ACT_GRAPH_TEXT_BASE + 6, Style::Number }, { L"÷", ACT_GRAPH_TEXT_BASE + 7, Style::Operator },
+              { L"π", ACT_GRAPH_TEXT_BASE + 8, Style::Operator } },
+            { { L"4", ACT_GRAPH_TEXT_BASE + 9, Style::Number }, { L"5", ACT_GRAPH_TEXT_BASE + 10, Style::Number },
+              { L"6", ACT_GRAPH_TEXT_BASE + 11, Style::Number }, { L"×", ACT_GRAPH_TEXT_BASE + 12, Style::Operator },
+              { L"e", ACT_GRAPH_TEXT_BASE + 13, Style::Operator } },
+            { { L"1", ACT_GRAPH_TEXT_BASE + 14, Style::Number }, { L"2", ACT_GRAPH_TEXT_BASE + 15, Style::Number },
+              { L"3", ACT_GRAPH_TEXT_BASE + 16, Style::Number }, { L"−", ACT_GRAPH_TEXT_BASE + 17, Style::Operator },
+              { L"|", ACT_GRAPH_TEXT_BASE + 18, Style::Operator } },
+            { { L"+/−", ACT_GRAPH_NEGATE, Style::Number }, { L"0", ACT_GRAPH_TEXT_BASE + 19, Style::Number },
+              { L".", ACT_GRAPH_TEXT_BASE + 20, Style::Number }, { L"+", ACT_GRAPH_TEXT_BASE + 21, Style::Operator },
+              { L"C", ACT_GRAPH_CLEAR, Style::Operator } },
+        };
+
+        const int cellWidth = (keypad.right - keypad.left) / 5;
+        const int cellHeight = (keypad.bottom - keypad.top) / 5;
+        for (int row = 0; row < 5; ++row)
+        {
+            for (int column = 0; column < 5; ++column)
+            {
+                const GraphKey& key = keys[row][column];
+                Btn button;
+                button.label = key.label;
+                button.action = key.action;
+                button.style = key.style;
+                button.textDip = (key.style == Style::Number) ? 18 : 15;
+                button.rc = { keypad.left + column * cellWidth + gap, keypad.top + row * cellHeight + gap,
+                              keypad.left + (column + 1) * cellWidth - gap, keypad.top + (row + 1) * cellHeight - gap };
+                m_buttons.push_back(button);
+            }
+        }
+    }
+
     void CalcApp::BuildDateLayout(int contentRight, int height, int y)
     {
         const int pad = Dp(kPadDip);
@@ -5131,6 +5954,7 @@ namespace
         { L"Calculator", L"", ACT_NONE, true },
         { L"Standard", L"", ACT_MODE_STANDARD, false },
         { L"Scientific", L"", ACT_MODE_SCIENTIFIC, false },
+        { L"Graphing", L"", ACT_MODE_GRAPHING, false },
         { L"Programmer", L"", ACT_MODE_PROGRAMMER, false },
         { L"Date calculation", L"", ACT_MODE_DATE, false },
     };
