@@ -2563,18 +2563,31 @@ namespace
 
 namespace
 {
+    // Shrinks the result until it fits the display.
+    //
+    // The floor has to go low enough for the longest value the app can produce:
+    // a 64-bit binary word is 64 digits plus 15 nibble separators, and
+    // scientific notation carries 32 significant digits plus an exponent. The
+    // old floor of 16 could not fit either, and since the text is right
+    // aligned what did not fit was clipped off the *front* -- a result reading
+    // ".333...e-1" with its leading digit missing, or a binary word showing
+    // eight nibbles of sixteen. Shrinking further is worse typography than
+    // clipping is wrong.
     void DrawAutoFitNumber(HDC hdc, const RECT& rc, std::wstring_view text, COLORREF color)
     {
+        constexpr int kMaxDip = 46;
+        constexpr int kMinDip = 8;
+
         const int maxWidth = rc.right - rc.left;
-        int dip = 46;
         SIZE size{};
-        while (dip > 16)
+        int dip = kMaxDip;
+        for (;;)
         {
             SelectObject(hdc, GetFont(dip, FW_SEMIBOLD, 1));
             GetTextExtentPoint32W(hdc, text.data(), static_cast<int>(text.size()), &size);
-            if (size.cx <= maxWidth)
+            if (size.cx <= maxWidth || dip <= kMinDip)
             {
-                break;
+                break; // the floor itself is measured, rather than stepped past
             }
             dip -= 2;
         }
