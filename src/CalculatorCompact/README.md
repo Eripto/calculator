@@ -223,9 +223,24 @@ bottom one. The editor carries the `f` badge and expression field, the
 Trigonometry / Inequalities / Function dropdowns, and the same five-by-seven
 keypad the shipping app uses, down to `x`, `y`, `(−)` and the return key.
 
-Pan by dragging the plot, zoom with the wheel or the buttons in the corner.
+Graph options is the shipping pane: the four window bounds, which can be typed
+into, a reset link, the angle units, the line thickness and the graph theme.
+The settings are real rather than decorative -- the units reach the evaluator,
+so a sine is drawn in degrees when degrees are chosen, and the thickness
+reaches the pen.
 
-The whole mode costs 25 KB of the binary.
+Pan by dragging the plot, zoom with the wheel or the buttons in the corner. A
+pan only begins when the plot is frontmost: the plot rect covers nearly the
+whole window, so without that check a click on a navigation item over the top
+of it began a pan instead, and the button-up that should have switched modes
+was swallowed.
+
+Trace and share are laid out but inert: tracing needs the analysis the
+closed-source solver provides, and sharing a plot has nowhere to go from here.
+Inequalities insert their symbol, which the parser does not accept, so such an
+equation shows as not plotted.
+
+The whole mode costs 43 KB of the binary.
 
 ## Memory
 
