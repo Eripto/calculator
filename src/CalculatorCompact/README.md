@@ -26,7 +26,7 @@ drawing, which is where the size saving comes from.
 | Memory | `MC MR M+ M- MS` strip plus the multi-slot memory list with per-slot commands |
 | History | Panel with newest-first entries; clicking one restores it by replaying its stored commands |
 | Chrome | Navigation pane with both category groups, Always on top, Settings/About, light/dark theme following the system setting, system accent colour, per-monitor DPI v2, dark title bar, keyboard shortcuts |
-| Motion | Sliding navigation pane and settings page, fading flyouts, page-transition on mode change, sliding history/memory panel, and Fluent hover and pointer-down states on every key |
+| Motion | Sliding navigation pane and settings page, fading flyouts, page-transition on mode change, history/memory panel that slides and cross-fades both ways, a 450ms theme cross-fade, and Fluent hover and pointer-down states on every key |
 
 ### Not included, and why
 
@@ -56,7 +56,7 @@ entering.
 | Navigation pane, Settings | Slides in from the left over a scrim, and back out |
 | Mode change | New content fades in while rising into place |
 | Dropdown flyouts | Fade in and lift |
-| History / memory panel | Slides in from the right when docked, upward when it covers the keypad |
+| History / memory panel | Slides in from the right when docked, upward when it covers the keypad, and back out the same way when dismissed |
 | Every key | Hover cross-fades between keys; pointer-down shrinks the key slightly and fades the pressed fill in |
 
 Frames are paced against the compositor with `DwmFlush` from the message loop,
@@ -65,12 +65,23 @@ what make timer-driven motion look like it stutters; the loop goes back to
 blocking on `GetMessage` as soon as everything settles, so an idle window costs
 nothing.
 
+`DwmFlush` is not enough on its own. It is meant to block until the next
+composition pass, but it returns immediately when the window is occluded, when
+composition is off, and on some drivers under load, and the loop then repaints
+as fast as the machine allows. A 16ms floor sits in front of it, which is all
+the compositor can show anyway; without it, switching modes quickly pegged a
+core.
+
 Two further implementation notes. Animated values are computed from the clock on demand
 rather than stepped, so a dropped frame never leaves an animation stranded
 part-way. And because GDI text has no alpha of its own, the transitions that
-need a true fade (mode change, flyouts) render to an offscreen layer and
-`AlphaBlend` it, rather than faking it with colour interpolation. The frame
-timer only runs while something is moving.
+need a true fade render to an offscreen layer and `AlphaBlend` it, rather than
+faking it with colour interpolation. Three do: the mode change and flyouts
+render the moving surface into the layer, while the panel and the theme change
+take a copy of the frame *before* the change and blend that back over the
+finished frame -- the panel is drawn by three separate passes and the theme
+touches every pixel in the window, so in both cases the old frame is the
+cheaper thing to hold. The frame timer only runs while something is moving.
 
 ## Visual fidelity
 
@@ -235,10 +246,15 @@ whole window, so without that check a click on a navigation item over the top
 of it began a pan instead, and the button-up that should have switched modes
 was swallowed.
 
-Trace and share are laid out but inert: tracing needs the analysis the
-closed-source solver provides, and sharing a plot has nowhere to go from here.
-Inequalities insert their symbol, which the parser does not accept, so such an
-equation shows as not plotted.
+Share copies the plot. The shipping app hands it to the Windows share sheet,
+which is a WinRT surface a desktop process cannot reach, so the clipboard
+carries the same two payloads to the same places: the plot as a bitmap for
+anything that takes an image, and the equations as text for anything that does
+not. A short confirmation appears over the plot and fades.
+
+Trace is laid out but inert: it needs the analysis the closed-source solver
+provides. Inequalities insert their symbol, which the parser does not accept,
+so such an equation shows as not plotted.
 
 The whole mode costs 43 KB of the binary.
 
@@ -272,13 +288,26 @@ Standard, Scientific, Programmer, Standard:
 | After | 19 | 16 MB |
 
 Alongside that, GDI+ is started with `SuppressBackgroundThread` and its
-notification hook pumped by hand, which drops a thread and its stack, and the
-settle timer asks the OS to trim the working set and decommit the heap's free
-blocks -- laying out a mode churns a lot of small allocations that the heap
-otherwise keeps the pages for.
+notification hook pumped by hand, which drops a thread and its stack.
 
-None of this changes what is drawn: the five screens captured before and after
-are pixel-identical, zero differing pixels.
+Leaving a mode hands its state back before the next one is built. The converter
+engine, which holds the current category's unit list and suggestion set, is
+dropped; the graphing mode's compiled programs go while the equation text
+stays, so the equations come back as they were and recompile on their next
+paint; and the layout vectors, which had grown to whatever the largest mode
+needed, are shrunk rather than carried into a mode that needs fewer buttons.
+
+One leak sat underneath all of this, in `Ratpack`. `ChangeConstants` reloads
+the precomputed constants through `READRAWRAT`, which called `createrat`
+without destroying what the pointer already held -- so every mode switch
+orphaned 32 rationals and their numerators and denominators, around 15KB a
+time, growing without bound for as long as the app ran. `DUPRAT` a few lines
+above it does the destroy first; `READRAWRAT` now does too. Measured against
+the engine directly, 2000 mode switches went from +29MB to +0KB, and
+LeakSanitizer reports nothing.
+
+None of this changes what is drawn: every mode captured before and after is
+pixel-identical, zero differing subpixels.
 
 A word on the target. Under 100KB is not reachable for a Win32 window, and the
 arithmetic says so before any profiling does: one back buffer for this window is

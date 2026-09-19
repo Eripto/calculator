@@ -325,6 +325,13 @@ namespace
         return 1.0f - inverse * inverse * inverse * inverse;
     }
 
+    // The mirror of decelerate: barely moves at first, then goes. Used for
+    // something that should sit still for a moment before it leaves.
+    inline float EaseAccelerate(float t)
+    {
+        return t * t * t;
+    }
+
     // Approximates "point to point", cubic-bezier(0.55, 0.55, 0, 1).
     inline float EaseStandard(float t)
     {
@@ -1004,6 +1011,41 @@ namespace
             return m_mode;
         }
 
+        // Hands back whatever the mode being left was holding. The converter
+        // is the only one that owns anything substantial -- its engine keeps
+        // the category's unit list and the suggestion set -- but the layout
+        // vectors have grown to whichever mode needed the most buttons, and
+        // there is no reason to carry that into a mode that needs fewer.
+        void ReleaseModeState(Mode leaving, Mode entering)
+        {
+            if (leaving == entering)
+            {
+                return;
+            }
+            if (leaving == Mode::Converter && entering != Mode::Converter)
+            {
+                m_converterModel.reset();
+            }
+            if (leaving == Mode::Graphing && entering != Mode::Graphing)
+            {
+                // The compiled programs go; the text stays, so the equations
+                // come back as they were and recompile on their next paint.
+                for (auto& equation : m_equations)
+                {
+                    equation.expression.Clear();
+                    equation.valid = false;
+                }
+                m_graphOptionsOpen = false;
+                m_graphField = -1;
+            }
+            m_buttons.clear();
+            m_buttons.shrink_to_fit();
+            m_menuButtons.clear();
+            m_menuButtons.shrink_to_fit();
+            m_menuItemStorage.clear();
+            m_menuItemStorage.shrink_to_fit();
+        }
+
         void SetMode(Mode mode)
         {
             if (m_mode == mode)
@@ -1014,6 +1056,7 @@ namespace
                 Relayout();
                 return;
             }
+            ReleaseModeState(m_mode, mode);
             m_mode = mode;
             m_navOpen = false;
             m_navAnim.To(0.0f, kMotionNormalMs);
@@ -1037,6 +1080,13 @@ namespace
                 break;
             case Mode::Graphing:
                 EnsureGraphing();
+                for (int i = 0; i < static_cast<int>(m_equations.size()); ++i)
+                {
+                    if (m_equations[i].expression.Empty() && !m_equations[i].text.empty())
+                    {
+                        RecompileEquation(i);
+                    }
+                }
                 break;
             case Mode::Date:
                 break;
@@ -1205,7 +1255,7 @@ namespace
             m_converterModel->SetCategory(categoryId);
             m_navOpen = false;
             m_menuOpen = false;
-            m_panel = Panel::None;
+            ForceClosePanel();
             m_navAnim.To(0.0f, kMotionNormalMs);
             StartContentEnter();
             Relayout();
@@ -1224,6 +1274,7 @@ namespace
         bool AnimationsRunning() const
         {
             return m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active() || m_menuAnim.Active() || m_contentAnim.Active()
+                || m_themeAnim.Active() || m_toastAnim.Active()
                 || m_pressAnim.Active() || m_hoverIn.Active() || m_hoverOut.Active();
         }
 
@@ -1245,6 +1296,12 @@ namespace
             if (!m_hwnd)
             {
                 return;
+            }
+            if (m_panelClosing && !m_panelAnim.Active())
+            {
+                m_panel = Panel::None;
+                m_panelClosing = false;
+                Relayout();
             }
             if (m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active())
             {
@@ -1277,6 +1334,71 @@ namespace
             {
                 m_hoverIn.To(1.0f, kMotionFastMs, EaseStandard);
             }
+            EnsureFrameTimer();
+        }
+
+        // The history/memory panel opens and closes with the same slide. On
+        // the way out it has to stay in the layout until the slide finishes,
+        // so m_panel is held and m_panelClosing marks it as on its way.
+        void OpenPanel(Panel panel)
+        {
+            const bool hidden = (m_panel == Panel::None);
+            m_panel = panel;
+            m_panelClosing = false;
+            m_historyScroll = 0;
+            if (hidden)
+            {
+                m_panelAnim.Set(0.0f);
+            }
+            m_panelAnim.To(1.0f, kMotionNormalMs);
+            EnsureFrameTimer();
+        }
+
+        void ClosePanel()
+        {
+            if (m_panel == Panel::None || m_panelClosing)
+            {
+                return;
+            }
+            m_panelClosing = true;
+            m_panelAnim.To(0.0f, kMotionNormalMs, EaseStandard);
+            EnsureFrameTimer();
+        }
+
+        // Runs once, on the frame after everything has come to rest. A panel
+        // on its way out is only dropped from the layout here, which is what
+        // keeps it on screen for the whole of its closing slide.
+        void OnAnimationsSettled()
+        {
+            if (m_panelClosing)
+            {
+                m_panel = Panel::None;
+                m_panelClosing = false;
+                Relayout();
+                // The keypad is not laid out while the panel covers it, so it
+                // has nothing on screen to come back from. Bring it in the way
+                // any other page arrives rather than letting it appear whole.
+                StartContentEnter();
+            }
+            Invalidate();
+        }
+
+        // Drops the panel without the slide, for the cases where the whole
+        // frame is being rebuilt anyway and there would be nothing to watch.
+        void ForceClosePanel()
+        {
+            m_panel = Panel::None;
+            m_panelClosing = false;
+            m_panelAnim.Set(0.0f);
+        }
+
+        // A short confirmation over the plot. It holds for most of its life
+        // and then goes, rather than fading from the moment it appears.
+        void ShowToast(std::wstring text)
+        {
+            m_toastText = std::move(text);
+            m_toastAnim.Set(1.0f);
+            m_toastAnim.To(0.0f, 1800, EaseAccelerate);
             EnsureFrameTimer();
         }
 
@@ -1413,6 +1535,7 @@ namespace
         bool m_bitBoard = false;
 
         Panel m_panel = Panel::None;
+        bool m_panelClosing = false; // panel is sliding back out but still laid out
         bool m_docked = false;
         bool m_navOpen = false;
         bool m_menuOpen = false;
@@ -1424,6 +1547,8 @@ namespace
         Anim m_navAnim;      // navigation pane, 0 closed .. 1 open
         Anim m_settingsAnim; // settings page
         Anim m_panelAnim;    // history / memory panel
+        Anim m_themeAnim;    // outgoing theme, fading out over the new one
+        Anim m_toastAnim;    // the confirmation over the plot, holding then fading
         Anim m_menuAnim;     // dropdown flyout
         Anim m_contentAnim;  // mode content entering
         Anim m_pressAnim;    // pointer-down shrink on the pressed key
@@ -1439,6 +1564,7 @@ namespace
         int m_menuContentHeight = 0;
         RECT m_menuRect{};
         RECT m_panelRect{};
+        int m_panelTop = 0; // where the panel sits with the slide finished
         RECT m_displayRect{};
         RECT m_exprRect{};
         RECT m_titleRect{};
@@ -1464,6 +1590,7 @@ namespace
         double m_graphYMax = 10.0;
         RECT m_graphRect{};
         RECT m_graphEquationRect{};
+        std::wstring m_toastText;
         // The shipping app shows either the plot or the equation editor, with a
         // two-tab toggle in the title bar between them, rather than stacking
         // both. It opens on the plot.
@@ -1763,6 +1890,7 @@ namespace
         // When the panel cannot dock beside the keypad it covers it instead,
         // so the hidden chrome is not laid out or hit tested at all.
         const bool overlay = (m_panel != Panel::None) && !m_docked;
+        m_panelTop = y;
         if (overlay)
         {
             m_panelRect = { 0, y + panelSlide, width, height };
@@ -3406,6 +3534,25 @@ namespace
                           DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
             }
         }
+
+        // The confirmation sits low over the plot, out of the way of the
+        // command bar in the opposite corner.
+        const float toast = app.m_toastAnim.Value();
+        if (toast > 0.004f && !app.m_toastText.empty())
+        {
+            const int textWidth = MeasureTextWidth(app.m_toastText, 12, FW_NORMAL, 0);
+            const int pillWidth = textWidth + Dp(24);
+            const int pillHeight = Dp(28);
+            const int cx = (plot.left + plot.right) / 2;
+            RECT pill{ cx - pillWidth / 2, plot.bottom - Dp(20) - pillHeight, cx + pillWidth / 2, plot.bottom - Dp(20) };
+
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            const int alpha = static_cast<int>(230.0f * toast);
+            FillRounded(g, pill, pillHeight / 2, g_theme.dark ? RGB(60, 60, 60) : RGB(44, 44, 44), alpha);
+            DrawLabel(hdc, pill, app.m_toastText, 12, Blend(g_theme.page, RGB(255, 255, 255), toast), false,
+                      DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        }
     }
 
     void EnsureGraphingSafe(CalcApp& app)
@@ -3716,6 +3863,16 @@ namespace
             return m_dc != nullptr;
         }
 
+        HDC Dc() const
+        {
+            return m_dc;
+        }
+
+        bool Matches(int width, int height) const
+        {
+            return m_dc != nullptr && m_width == width && m_height == height;
+        }
+
     private:
         HDC m_dc = nullptr;
         HBITMAP m_bitmap = nullptr;
@@ -3764,8 +3921,146 @@ namespace
         }
     }
 
+    // Never composite more often than this, whatever DwmFlush does.
+    constexpr ULONGLONG kMinFrameMs = 16; // 60fps; the compositor will not show more
+    ULONGLONG g_lastFrameTick = 0;
+
     Surface g_backBuffer;
     Surface g_scratch;
+
+    // Holds the frame as it looked under the outgoing theme, for the length of
+    // the cross-fade and no longer.
+    Surface g_themeLayer;
+
+    // Set while g_scratch holds an outer composite, so a nested fade knows to
+    // draw straight to its target instead of stealing the layer.
+    bool g_scratchHeld = false;
+
+    // Switching theme repaints every surface in the window at once, which is
+    // far too much to change in a single frame. Grabbing the frame as it is
+    // now, before the palette is swapped, lets the new one fade up underneath
+    // it -- and at 450ms it is a deliberate, unhurried change rather than a
+    // flash. Nothing is kept afterwards: the copy goes as soon as it ends.
+    constexpr int kThemeFadeMs = 450;
+
+    // Share, by the only route a desktop process has.
+    //
+    // The shipping app hands the plot to the Windows share sheet, which is a
+    // WinRT surface and out of reach from here. The clipboard carries the same
+    // two payloads to the same places: the plot as a bitmap, for anything that
+    // takes an image, and the equations as text for anything that does not.
+    bool CopyGraphToClipboard(CalcApp& app)
+    {
+        const RECT plot = app.m_graphRect;
+        const int width = plot.right - plot.left;
+        const int height = plot.bottom - plot.top;
+        HDC source = g_backBuffer.Dc();
+        if (source == nullptr || width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        HDC target = CreateCompatibleDC(source);
+        if (target == nullptr)
+        {
+            return false;
+        }
+        HBITMAP bitmap = CreateCompatibleBitmap(source, width, height);
+        if (bitmap == nullptr)
+        {
+            DeleteDC(target);
+            return false;
+        }
+        HGDIOBJ previousBitmap = SelectObject(target, bitmap);
+        BitBlt(target, 0, 0, width, height, source, plot.left, plot.top, SRCCOPY);
+        // The clipboard takes ownership of a bitmap that is not selected
+        // anywhere, so put the DC back the way it was before handing it over.
+        SelectObject(target, previousBitmap);
+        DeleteDC(target);
+
+        std::wstring equations;
+        for (const auto& equation : app.m_equations)
+        {
+            if (equation.text.empty())
+            {
+                continue;
+            }
+            if (!equations.empty())
+            {
+                equations.append(L"\r\n");
+            }
+            equations.append(L"y=");
+            equations.append(equation.text);
+        }
+
+        HGLOBAL text = nullptr;
+        if (!equations.empty())
+        {
+            text = GlobalAlloc(GMEM_MOVEABLE, (equations.size() + 1) * sizeof(wchar_t));
+            if (text != nullptr)
+            {
+                void* buffer = GlobalLock(text);
+                if (buffer != nullptr)
+                {
+                    memcpy(buffer, equations.c_str(), (equations.size() + 1) * sizeof(wchar_t));
+                    GlobalUnlock(text);
+                }
+                else
+                {
+                    GlobalFree(text);
+                    text = nullptr;
+                }
+            }
+        }
+
+        if (!OpenClipboard(app.m_hwnd))
+        {
+            DeleteObject(bitmap);
+            if (text != nullptr)
+            {
+                GlobalFree(text);
+            }
+            return false;
+        }
+        EmptyClipboard();
+        const bool placed = SetClipboardData(CF_BITMAP, bitmap) != nullptr;
+        if (!placed)
+        {
+            DeleteObject(bitmap);
+        }
+        if (text != nullptr && SetClipboardData(CF_UNICODETEXT, text) == nullptr)
+        {
+            GlobalFree(text);
+        }
+        CloseClipboard();
+        return placed;
+    }
+
+    void BeginThemeFade(CalcApp& app)
+    {
+        if (app.m_hwnd == nullptr)
+        {
+            return;
+        }
+        RECT client{};
+        GetClientRect(app.m_hwnd, &client);
+        const int width = client.right;
+        const int height = client.bottom;
+        HDC previous = g_backBuffer.Dc();
+        if (width <= 0 || height <= 0 || !g_backBuffer.Matches(width, height))
+        {
+            return;
+        }
+        HDC layer = g_themeLayer.Acquire(previous, width, height);
+        if (layer == nullptr)
+        {
+            return;
+        }
+        BitBlt(layer, 0, 0, width, height, previous, 0, 0, SRCCOPY);
+        app.m_themeAnim.Set(1.0f);
+        app.m_themeAnim.To(0.0f, kThemeFadeMs, EaseStandard);
+        app.EnsureFrameTimer();
+    }
 
     void PaintNavOverlay(HDC hdc, CalcApp& app, int width, int height)
     {
@@ -4076,6 +4371,20 @@ namespace
             PaintGraphOptions(hdc, app);
         }
 
+        // Nothing panel-shaped has been drawn yet, so this is the frame the
+        // panel fades up from -- and back down to when it is dismissed.
+        HDC panelLayer = nullptr;
+        if (app.m_panel != Panel::None && !app.m_docked && !g_scratchHeld && width > 0 && height > 0
+            && app.m_panelAnim.Value() < 0.995f)
+        {
+            panelLayer = g_scratch.Acquire(hdc, width, height);
+            if (panelLayer != nullptr)
+            {
+                g_scratchHeld = true;
+                BitBlt(panelLayer, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
+            }
+        }
+
         // --- shapes -------------------------------------------------------
         {
             Gdiplus::Graphics g(hdc);
@@ -4302,6 +4611,27 @@ namespace
             PaintPanelContents(hdc, app);
         }
 
+        // The panel cross-fades as well as slides, both ways. Its card, its
+        // buttons and its rows are drawn by three separate passes above, so
+        // rather than divert each one through a layer, the frame was copied
+        // before the first of them: blending that copy back over the finished
+        // frame is the same fade, and leaves everything outside the panel
+        // untouched because there it is blending identical pixels.
+        if (panelLayer != nullptr)
+        {
+            // Only the band the panel can occupy: the title row and the
+            // display are drawn after the copy was taken, so blending over
+            // them would wash them out along with it.
+            const int top = (std::max)(0, app.m_panelTop);
+            if (height > top)
+            {
+                BLENDFUNCTION blend{};
+                blend.BlendOp = AC_SRC_OVER;
+                blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * (1.0f - app.m_panelAnim.Value()));
+                AlphaBlend(hdc, 0, top, width, height - top, panelLayer, 0, top, width, height - top, blend);
+            }
+            g_scratchHeld = false;
+        }
     }
 
     // The overlay surfaces: navigation pane or settings page, then any dropdown.
@@ -4397,6 +4727,7 @@ namespace
             PaintFlyout(hdc);
             return;
         }
+        g_scratchHeld = true;
         BitBlt(layer, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
         SetBkMode(layer, TRANSPARENT);
 
@@ -4408,6 +4739,7 @@ namespace
         SetViewportOrgEx(layer, 0, lift, &previousOrigin);
         PaintFlyout(layer);
         SetViewportOrgEx(layer, previousOrigin.x, previousOrigin.y, nullptr);
+        g_scratchHeld = false;
 
         BLENDFUNCTION blend{};
         blend.BlendOp = AC_SRC_OVER;
@@ -4448,7 +4780,9 @@ namespace
             return;
         }
 
+        g_scratchHeld = true;
         PaintContent(layer, width, height);
+        g_scratchHeld = false;
 
         BLENDFUNCTION blend{};
         blend.BlendOp = AC_SRC_OVER;
@@ -4872,7 +5206,7 @@ namespace
         app.Send(Command::CommandFE);
         app.m_manager->SetInHistoryItemLoadMode(false);
 
-        app.m_panel = Panel::None;
+        app.ForceClosePanel();
         app.Relayout();
     }
 
@@ -5187,12 +5521,22 @@ namespace
         case ACT_THEME_LIGHT:
         case ACT_THEME_DARK:
         case ACT_THEME_SYSTEM:
+        {
+            const bool wasDark = g_theme.dark;
             app.m_themeChoice = (action == ACT_THEME_LIGHT) ? 1 : (action == ACT_THEME_DARK) ? 2 : 0;
             g_themeOverride = app.m_themeChoice;
+            BeginThemeFade(app);
             LoadTheme();
+            if (wasDark == g_theme.dark)
+            {
+                // Same palette after all -- only the radio moved, so there is
+                // nothing to cross-fade.
+                app.m_themeAnim.Set(0.0f);
+            }
             ApplyTitleBarTheme(app.m_hwnd);
             app.Relayout();
             break;
+        }
         case ACT_ALWAYS_ON_TOP:
             app.m_alwaysOnTop = !app.m_alwaysOnTop;
             SetWindowPos(app.m_hwnd, app.m_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -5244,10 +5588,12 @@ namespace
             app.m_graphAlwaysLight = (action == ACT_GRAPH_THEME_LIGHT);
             app.Relayout();
             break;
-        case ACT_GRAPH_TRACE:
         case ACT_GRAPH_SHARE:
-            // Laid out for fidelity; tracing needs the analysis the solver
-            // would provide, and sharing a plot has nowhere to go from here.
+            app.ShowToast(CopyGraphToClipboard(app) ? L"Graph copied to clipboard" : L"Could not copy the graph");
+            break;
+        case ACT_GRAPH_TRACE:
+            // Laid out for fidelity; tracing needs the analysis the closed
+            // solver would provide.
             break;
         case ACT_GRAPH_ADD:
         {
@@ -5334,25 +5680,23 @@ namespace
             app.SetMode(Mode::Programmer);
             break;
         case ACT_TOGGLE_PANEL:
-            app.m_panel = (app.m_panel == Panel::None) ? (app.m_mode == Mode::Programmer ? Panel::Memory : Panel::History) : Panel::None;
-            app.m_historyScroll = 0;
-            if (app.m_panel != Panel::None)
+            if (app.m_panel == Panel::None || app.m_panelClosing)
             {
-                app.m_panelAnim.Set(0.0f);
-                app.m_panelAnim.To(1.0f, kMotionNormalMs);
-                app.EnsureFrameTimer();
+                app.OpenPanel(app.m_mode == Mode::Programmer ? Panel::Memory : Panel::History);
+            }
+            else
+            {
+                app.ClosePanel();
             }
             app.Relayout();
             break;
         case ACT_PANEL_HISTORY:
-            app.m_panel = Panel::History;
-            app.m_historyScroll = 0;
+            app.OpenPanel(Panel::History);
             app.Relayout();
             break;
         case ACT_PANEL_MEMORY:
         case ACT_MEMORY_PANEL:
-            app.m_panel = Panel::Memory;
-            app.m_historyScroll = 0;
+            app.OpenPanel(Panel::Memory);
             app.Relayout();
             break;
         case ACT_HISTORY_CLEAR:
@@ -5799,6 +6143,20 @@ namespace
             if (memDC != nullptr)
             {
                 PaintApp(memDC, width, height);
+
+                const float outgoing = app.m_themeAnim.Value();
+                if (outgoing > 0.004f && g_themeLayer.Matches(width, height))
+                {
+                    BLENDFUNCTION blend{};
+                    blend.BlendOp = AC_SRC_OVER;
+                    blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * outgoing);
+                    AlphaBlend(memDC, 0, 0, width, height, g_themeLayer.Dc(), 0, 0, width, height, blend);
+                }
+                else if (g_themeLayer.Held())
+                {
+                    g_themeLayer.Release();
+                }
+
                 BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
             }
             else
@@ -6125,7 +6483,13 @@ namespace
         case WM_SETTINGCHANGE:
             if (lParam && lstrcmpiW(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0)
             {
+                const bool wasDark = g_theme.dark;
+                BeginThemeFade(app);
                 LoadTheme();
+                if (wasDark == g_theme.dark)
+                {
+                    app.m_themeAnim.Set(0.0f);
+                }
                 ApplyTitleBarTheme(hwnd);
                 app.Invalidate();
             }
@@ -6134,6 +6498,7 @@ namespace
         case WM_DESTROY:
             g_backBuffer.Release();
             g_scratch.Release();
+            g_themeLayer.Release();
             PostQuitMessage(0);
             return 0;
 
@@ -6217,6 +6582,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
             // soon as one ends. The back buffer stays: the next paint needs it,
             // and releasing it only guarantees an allocation to get it back.
             g_scratch.Release();
+            g_themeLayer.Release();
+            g_app.OnAnimationsSettled();
         }
         wasAnimating = animating;
 
@@ -6246,6 +6613,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
             break;
         }
 
+        // A frame-rate floor, independent of DwmFlush.
+        //
+        // DwmFlush is meant to block until the next composition pass, but it
+        // returns immediately when the window is occluded, when composition is
+        // off, and on some drivers under load. Without a floor the loop then
+        // repaints as fast as the machine allows -- a full-window composite per
+        // iteration, which pegs a core and churns the allocator hard enough to
+        // look like a leak.
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG sinceLastFrame = now - g_lastFrameTick;
+        if (sinceLastFrame < kMinFrameMs)
+        {
+            Sleep(static_cast<DWORD>(kMinFrameMs - sinceLastFrame));
+        }
+        g_lastFrameTick = GetTickCount64();
+
         g_app.FrameTick();
         if (FAILED(DwmFlush()))
         {
@@ -6256,6 +6639,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     ClearFontCache();
     g_backBuffer.Release();
     g_scratch.Release();
+    g_themeLayer.Release();
     if (gdiplusHooked && startupOutput.NotificationUnhook != nullptr)
     {
         startupOutput.NotificationUnhook(gdiplusHook);
