@@ -1,8 +1,8 @@
 # Calculator
-The Windows Calculator app is a modern Windows app written in C++ and C# that ships pre-installed with Windows.
+The Windows Calculator app is a modern Windows app written in C++ and C#
 The app provides standard, scientific, and programmer calculator functionality, as well as a set of converters between various units of measurement and currencies.
 
-Calculator ships regularly with new features and bug fixes. You can get the latest version of Calculator in the [Microsoft Store](https://www.microsoft.com/store/apps/9WZDNCRFHVN5).
+Calculator ships regularly with better optimization and bug fixes. You can get the latest version of Calculator in the Releases
 
 [![Continuous Integration](https://github.com/microsoft/calculator/actions/workflows/action-ci.yml/badge.svg)](https://github.com/microsoft/calculator/actions/workflows/action-ci.yml)
 
