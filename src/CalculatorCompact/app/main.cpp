@@ -549,6 +549,10 @@ namespace
         ACT_MEM_RECALL,
         ACT_MEM_ADD,
         ACT_MEM_SUB,
+        ACT_ABOUT_EXPAND,
+        ACT_THEME_LIGHT,
+        ACT_THEME_DARK,
+        ACT_THEME_SYSTEM,
         // Ranged actions carry an index in their low digits; Execute() tests them
         // from the highest base down, so the ranges must not overlap.
         ACT_BIT_BASE = 2000,       // + bit index 0..63
@@ -577,6 +581,32 @@ namespace
     static_assert(ACT_CONV_UNIT_FROM_BASE + 300 <= ACT_CONV_UNIT_TO_BASE, "unit lists must not overlap");
     static_assert(ACT_DATE_VALUE_BASE + 16000 < kCommandBase, "date values must stay below the engine commands");
 
+    enum VIcon
+    {
+        VIcon_None = 0,
+        VIcon_Menu,
+        VIcon_Back,
+        VIcon_History,
+        VIcon_KeepOnTop,
+        VIcon_KeepOnTopOn,
+        VIcon_Backspace,
+        VIcon_ChevronDown,
+        VIcon_ChevronUp,
+        VIcon_ChevronLeft,
+        VIcon_ChevronRight,
+        VIcon_Calendar,
+        VIcon_Gear,
+        VIcon_RadioOn,
+        VIcon_RadioOff,
+        VIcon_Palette,
+        VIcon_Calculator,
+        VIcon_Close,
+    };
+
+    int MeasureTextWidth(std::wstring_view text, int dip, int weight, int face);
+    int VIconForGlyph(std::wstring_view label);
+    void DrawVectorIcon(Gdiplus::Graphics& g, const RECT& rc, int id, COLORREF color, int sizeDip);
+
     struct Btn
     {
         std::wstring_view label;
@@ -589,6 +619,9 @@ namespace
         bool leftAlign = false;  // nav rows and list entries read left-to-right
         bool dateField = false;  // draws a trailing calendar glyph and a rule
         bool combo = false;      // combo box: leading text, trailing chevron
+        int vicon = 0;           // VIcon_*: drawn as a path instead of a glyph
+        bool radio = false;      // draws a leading radio button
+        bool accentText = false; // link-coloured label
         int textDip = 0;        // 0 = use the style default
     };
 
@@ -799,7 +832,9 @@ namespace
 {
     // ------------------------------------------------------------- the app
 
-    constexpr int kNavRowDip = 44;
+    constexpr int kNavRowDip = 48;   // HamburgerHeight in App.xaml
+    constexpr int kTitleDip = 20;    // SubtitleTextBlockStyle
+    constexpr int kNavPaneDip = 256; // SplitViewOpenPaneLength in App.xaml
     constexpr int kExprRowDip = 22;
     constexpr int kResultRowDip = 62;
     constexpr int kStripRowDip = 32;
@@ -1011,34 +1046,34 @@ namespace
                 || m_pressAnim.Active() || m_hoverIn.Active() || m_hoverOut.Active();
         }
 
-        // The frame timer only runs while something is moving.
+        // Frames are paced by the message loop against the compositor, so this
+        // only has to wake it: starting an animation from a message handler
+        // means the loop re-checks AnimationsRunning() on its next pass.
         void EnsureFrameTimer()
+        {
+            if (m_hwnd && AnimationsRunning())
+            {
+                Invalidate();
+            }
+        }
+
+        // One animation frame: anything that moves a control moves its hit
+        // target too, so those frames relayout rather than just repaint.
+        void FrameTick()
         {
             if (!m_hwnd)
             {
                 return;
             }
-            if (AnimationsRunning())
+            if (m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active())
             {
-                if (!m_frameTimerOn)
-                {
-                    SetTimer(m_hwnd, 2, 16, nullptr);
-                    m_frameTimerOn = true;
-                }
+                Relayout();
             }
-            else if (m_frameTimerOn)
+            else
             {
-                KillTimer(m_hwnd, 2);
-                m_frameTimerOn = false;
-                m_navAnim.Settle();
-                m_settingsAnim.Settle();
-                m_panelAnim.Settle();
-                m_menuAnim.Settle();
-                m_contentAnim.Settle();
-                m_pressAnim.Settle();
-                m_hoverIn.Settle();
-                m_hoverOut.Settle();
+                Invalidate();
             }
+            UpdateWindow(m_hwnd);
         }
 
         // Cross-fades the highlight from the previously hovered key to the new
@@ -1185,6 +1220,8 @@ namespace
         int m_converterCategory = 4; // Volume, the first converter category
         bool m_alwaysOnTop = false;
         int m_themeChoice = 0; // 0 system, 1 light, 2 dark
+        bool m_themeExpanded = false;
+        bool m_aboutExpanded = false;
         bool m_settingsOpen = false;
         bool m_second = false;
         bool m_hyp = false;
@@ -1213,7 +1250,6 @@ namespace
         Anim m_hoverOut;
         int m_hoverInAction = ACT_NONE;
         int m_hoverOutAction = ACT_NONE;
-        bool m_frameTimerOn = false;
         std::vector<Btn> m_menuButtons;
         std::vector<MenuItem> m_menuItemStorage;
         std::vector<std::wstring> m_menuLabelStorage;
@@ -1224,6 +1260,14 @@ namespace
         RECT m_panelRect{};
         RECT m_displayRect{};
         RECT m_exprRect{};
+        RECT m_titleRect{};
+        int m_navPaneWidth = 0;
+        RECT m_settingsAppearanceRect{};
+        RECT m_settingsAboutRect{};
+        RECT m_settingsThemePanel{};
+        RECT m_settingsAboutPanel{};
+        RECT m_settingsFeedbackRect{};
+        RECT m_settingsContributeRect{};
         struct NavGlyph
         {
             std::wstring_view glyph;
@@ -1400,43 +1444,52 @@ namespace
 
         int y = 0;
 
-        // Nav row: menu button, mode name, history toggle.
+        // Title bar row, laid out as MainPage.xaml has it: a 48px hamburger, the
+        // mode name, and the keep-on-top button immediately after the title
+        // rather than off at the window edge. History is the only trailing item.
         const int navH = Dp(kNavRowDip);
         {
+            const int centre = navH / 2;
+            const int iconHalf = Dp(16); // SquareIconButtonStyle is 32x32
+
             Btn menu;
-            menu.label = L"";
             menu.action = ACT_NAV_MENU;
             menu.style = Style::Flat;
-            menu.icon = true;
-            menu.textDip = 14;
-            menu.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
+            menu.vicon = VIcon_Menu;
+            menu.textDip = 16;
+            menu.rc = { Dp(2), centre - Dp(22), Dp(46), centre + Dp(22) };
             m_buttons.push_back(menu);
 
-            int right = contentRight - Dp(4);
+            const int titleLeft = Dp(48);
+            const int titleWidth = MeasureTextWidth(ModeName(), kTitleDip, FW_SEMIBOLD, 0);
+            m_titleRect = { titleLeft, 0, titleLeft + titleWidth, navH };
+
+            int right = contentRight - Dp(6);
 
             const bool calculatorMode = (m_mode == Mode::Standard || m_mode == Mode::Scientific || m_mode == Mode::Programmer);
             if (calculatorMode)
             {
                 Btn hist;
-                hist.label = L"";
                 hist.action = ACT_TOGGLE_PANEL;
                 hist.style = Style::Flat;
-                hist.icon = true;
-                hist.textDip = 15;
+                hist.vicon = VIcon_History;
+                hist.textDip = 16;
                 hist.checked = (m_panel != Panel::None);
-                hist.rc = { right - Dp(40), pad + Dp(2), right, pad + Dp(38) };
+                hist.rc = { right - iconHalf * 2, centre - iconHalf, right, centre + iconHalf };
                 m_buttons.push_back(hist);
-                right -= Dp(42);
+                right -= iconHalf * 2 + Dp(4);
             }
 
+            // 10px after the title, per SquareIconButtonStyle's margin, but never
+            // so far right that it collides with the history toggle.
             Btn onTop;
-            onTop.label = m_alwaysOnTop ? L"" : L"";
             onTop.action = ACT_ALWAYS_ON_TOP;
             onTop.style = Style::Flat;
-            onTop.icon = true;
-            onTop.textDip = 14;
+            onTop.vicon = m_alwaysOnTop ? VIcon_KeepOnTopOn : VIcon_KeepOnTop;
+            onTop.textDip = 16;
             onTop.checked = m_alwaysOnTop;
-            onTop.rc = { right - Dp(40), pad + Dp(2), right, pad + Dp(38) };
+            const int onTopLeft = (std::min)(titleLeft + titleWidth + Dp(10), right - iconHalf * 2);
+            onTop.rc = { onTopLeft, centre - iconHalf, onTopLeft + iconHalf * 2, centre + iconHalf };
             m_buttons.push_back(onTop);
         }
         y += navH;
@@ -1819,6 +1872,32 @@ namespace
     // Windows 10 and 11 always ship an icon font, so this is a safety net rather
     // than a normal path: without it a missing font would render the chrome as
     // empty boxes.
+    // A label that is nothing but one of these glyphs is drawn as a path
+    // instead. Keeps the chrome monochrome and independent of which icon font
+    // the machine happens to have.
+    int VIconForGlyph(std::wstring_view label)
+    {
+        if (label.size() != 1)
+        {
+            return VIcon_None;
+        }
+        switch (label[0])
+        {
+        case 0xE700: return VIcon_Menu;
+        case 0xE72B: return VIcon_Back;
+        case 0xE81C: return VIcon_History;
+        case 0xE750: return VIcon_Backspace;
+        case 0xE70D: return VIcon_ChevronDown;
+        case 0xE70E: return VIcon_ChevronUp;
+        case 0xE76B: return VIcon_ChevronLeft;
+        case 0xE76C: return VIcon_ChevronRight;
+        case 0xE74D: return VIcon_Close;
+        case 0xE787: return VIcon_Calendar;
+        case 0xE713: return VIcon_Gear;
+        default: return VIcon_None;
+        }
+    }
+
     std::wstring_view IconFallback(std::wstring_view glyph)
     {
         if (glyph == L"") return L"☰"; // hamburger
@@ -1857,6 +1936,22 @@ namespace
             VARIABLE_PITCH, name);
         g_fonts.push_back({ height, weight, face, italic, font });
         return font;
+    }
+
+    // Laying the title bar out needs the title's width before painting starts.
+    int MeasureTextWidth(std::wstring_view text, int dip, int weight, int face)
+    {
+        if (text.empty())
+        {
+            return 0;
+        }
+        HDC hdc = GetDC(nullptr);
+        HGDIOBJ previous = SelectObject(hdc, GetFont(dip, weight, face));
+        SIZE size{};
+        GetTextExtentPoint32W(hdc, text.data(), static_cast<int>(text.size()), &size);
+        SelectObject(hdc, previous);
+        ReleaseDC(nullptr, hdc);
+        return size.cx;
     }
 
     void ClearFontCache()
@@ -1973,6 +2068,11 @@ namespace
 
     COLORREF ButtonText(const Btn& b)
     {
+        if (b.accentText)
+        {
+            return g_theme.accent;
+        }
+
         if (b.style == Style::Card)
         {
             return g_theme.primaryText; // cards carry content even when inert
@@ -2095,11 +2195,30 @@ namespace
         }
 
         const std::wstring_view head = text.substr(0, split);
-        const bool iconFont = IconFontAvailable();
-        const std::wstring_view tail = iconFont ? text.substr(split) : IconFallback(text.substr(split));
         SelectObject(hdc, GetFont(dip));
         SIZE headSize{};
         GetTextExtentPoint32W(hdc, head.data(), static_cast<int>(head.size()), &headSize);
+
+        // A trailing chevron is a path, so it matches the standalone ones and
+        // cannot be substituted by a colour font.
+        const int vectorTail = VIconForGlyph(text.substr(split));
+        if (vectorTail != VIcon_None)
+        {
+            const int tailWidth = Dp(dip);
+            const int total = headSize.cx + Dp(1) + tailWidth;
+            const int x = rc.left + ((rc.right - rc.left) - total) / 2;
+            RECT r = rc;
+            r.left = x;
+            DrawLabel(hdc, r, head, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            RECT icon{ x + headSize.cx + Dp(1), rc.top, x + headSize.cx + Dp(1) + tailWidth, rc.bottom };
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            DrawVectorIcon(g, icon, vectorTail, color, dip);
+            return;
+        }
+
+        const bool iconFont = IconFontAvailable();
+        const std::wstring_view tail = iconFont ? text.substr(split) : IconFallback(text.substr(split));
         SelectObject(hdc, GetFont(dip - 2, FW_NORMAL, iconFont ? 2 : 0));
         SIZE tailSize{};
         GetTextExtentPoint32W(hdc, tail.data(), static_cast<int>(tail.size()), &tailSize);
@@ -2111,6 +2230,190 @@ namespace
         DrawLabel(hdc, r, head, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
         r.left = x + headSize.cx + Dp(3);
         DrawLabel(hdc, r, tail, dip - 2, color, iconFont, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+    }
+
+    // The chrome icons are drawn as paths rather than font glyphs. Segoe's icon
+    // fonts are not guaranteed to carry every codepoint, and the text-presentation
+    // characters we used to fall back on can be substituted by a colour emoji
+    // font, which puts blue and orange into a title bar that should be
+    // monochrome. Paths are immune to both.
+
+    // Every icon is described on a 16x16 grid and scaled to sizeDip, the way the
+    // icon fonts are drawn from a 16px em box.
+    void DrawVectorIcon(Gdiplus::Graphics& g, const RECT& rc, int id, COLORREF color, int sizeDip)
+    {
+        if (id == VIcon_None || sizeDip <= 0)
+        {
+            return;
+        }
+
+        const float s = static_cast<float>(Dp(sizeDip)) / 16.0f;
+        const float ox = static_cast<float>(rc.left + rc.right) * 0.5f - 8.0f * s;
+        const float oy = static_cast<float>(rc.top + rc.bottom) * 0.5f - 8.0f * s;
+        const auto P = [&](float x, float y) { return Gdiplus::PointF(ox + x * s, oy + y * s); };
+
+        const Gdiplus::Color gp(GetRValue(color), GetGValue(color), GetBValue(color));
+        Gdiplus::Pen pen(gp, 1.1f * s);
+        pen.SetStartCap(Gdiplus::LineCapRound);
+        pen.SetEndCap(Gdiplus::LineCapRound);
+        pen.SetLineJoin(Gdiplus::LineJoinRound);
+        Gdiplus::SolidBrush brush(gp);
+
+        switch (id)
+        {
+        case VIcon_Menu:
+            g.DrawLine(&pen, P(2.5f, 4.0f), P(13.5f, 4.0f));
+            g.DrawLine(&pen, P(2.5f, 8.0f), P(13.5f, 8.0f));
+            g.DrawLine(&pen, P(2.5f, 12.0f), P(13.5f, 12.0f));
+            break;
+
+        case VIcon_Back:
+            g.DrawLine(&pen, P(3.2f, 8.0f), P(13.0f, 8.0f));
+            g.DrawLine(&pen, P(7.6f, 3.6f), P(3.2f, 8.0f));
+            g.DrawLine(&pen, P(3.2f, 8.0f), P(7.6f, 12.4f));
+            break;
+
+        case VIcon_History:
+        {
+            // An open circle with an arrowhead at the break, plus clock hands.
+            const Gdiplus::RectF dial(ox + 2.8f * s, oy + 3.3f * s, 10.4f * s, 10.4f * s);
+            g.DrawArc(&pen, dial, 250.0f, 290.0f);
+            const Gdiplus::PointF head[3] = { P(7.4f, 1.7f), P(7.4f, 5.7f), P(4.5f, 3.7f) };
+            g.FillPolygon(&brush, head, 3);
+            g.DrawLine(&pen, P(8.0f, 5.6f), P(8.0f, 8.6f));
+            g.DrawLine(&pen, P(8.0f, 8.6f), P(10.5f, 9.9f));
+            break;
+        }
+
+        case VIcon_KeepOnTop:
+        case VIcon_KeepOnTopOn:
+        {
+            // The shipping "keep on top" glyph: a window with a second, smaller
+            // window pinned inside its trailing corner.
+            Gdiplus::RectF outer(ox + 2.0f * s, oy + 3.4f * s, 12.0f * s, 9.2f * s);
+            g.DrawRectangle(&pen, outer);
+            Gdiplus::RectF inner(ox + 8.0f * s, oy + 7.2f * s, 4.6f * s, 3.6f * s);
+            if (id == VIcon_KeepOnTopOn)
+            {
+                g.FillRectangle(&brush, inner);
+            }
+            else
+            {
+                g.DrawRectangle(&pen, inner);
+            }
+            break;
+        }
+
+        case VIcon_Backspace:
+        {
+            const Gdiplus::PointF body[5] = { P(5.6f, 3.4f), P(14.4f, 3.4f), P(14.4f, 12.6f), P(5.6f, 12.6f), P(1.4f, 8.0f) };
+            g.DrawPolygon(&pen, body, 5);
+            g.DrawLine(&pen, P(7.9f, 6.4f), P(11.7f, 9.6f));
+            g.DrawLine(&pen, P(11.7f, 6.4f), P(7.9f, 9.6f));
+            break;
+        }
+
+        case VIcon_ChevronDown:
+            g.DrawLine(&pen, P(4.5f, 6.5f), P(8.0f, 10.0f));
+            g.DrawLine(&pen, P(8.0f, 10.0f), P(11.5f, 6.5f));
+            break;
+
+        case VIcon_ChevronUp:
+            g.DrawLine(&pen, P(4.5f, 9.5f), P(8.0f, 6.0f));
+            g.DrawLine(&pen, P(8.0f, 6.0f), P(11.5f, 9.5f));
+            break;
+
+        case VIcon_ChevronLeft:
+            g.DrawLine(&pen, P(9.5f, 4.5f), P(6.0f, 8.0f));
+            g.DrawLine(&pen, P(6.0f, 8.0f), P(9.5f, 11.5f));
+            break;
+
+        case VIcon_ChevronRight:
+            g.DrawLine(&pen, P(6.5f, 4.5f), P(10.0f, 8.0f));
+            g.DrawLine(&pen, P(10.0f, 8.0f), P(6.5f, 11.5f));
+            break;
+
+        case VIcon_Calendar:
+        {
+            Gdiplus::RectF body(ox + 2.0f * s, oy + 3.6f * s, 12.0f * s, 10.4f * s);
+            g.DrawRectangle(&pen, body);
+            g.DrawLine(&pen, P(2.0f, 6.8f), P(14.0f, 6.8f));
+            g.DrawLine(&pen, P(5.4f, 2.0f), P(5.4f, 5.0f));
+            g.DrawLine(&pen, P(10.6f, 2.0f), P(10.6f, 5.0f));
+            break;
+        }
+
+        case VIcon_Gear:
+        {
+            // Eight teeth around a hub, with the bore punched out by the
+            // alternating fill rule.
+            Gdiplus::GraphicsPath path;
+            path.SetFillMode(Gdiplus::FillModeAlternate);
+            Gdiplus::PointF teeth[16];
+            for (int i = 0; i < 16; ++i)
+            {
+                const float angle = (3.14159265f / 8.0f) * static_cast<float>(i);
+                const float radius = (i % 2 == 0) ? 7.0f : 5.2f;
+                teeth[i] = P(8.0f + radius * cosf(angle), 8.0f + radius * sinf(angle));
+            }
+            path.AddPolygon(teeth, 16);
+            path.AddEllipse(ox + 5.6f * s, oy + 5.6f * s, 4.8f * s, 4.8f * s);
+            g.FillPath(&brush, &path);
+            break;
+        }
+
+        case VIcon_Close:
+            g.DrawLine(&pen, P(4.2f, 4.2f), P(11.8f, 11.8f));
+            g.DrawLine(&pen, P(11.8f, 4.2f), P(4.2f, 11.8f));
+            break;
+
+        case VIcon_RadioOff:
+            g.DrawEllipse(&pen, ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s);
+            break;
+
+        case VIcon_RadioOn:
+        {
+            // A filled accent ring with a white dot, as WinUI draws a checked
+            // radio button.
+            g.FillEllipse(&brush, ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s);
+            Gdiplus::SolidBrush centre(ToGp(g_theme.card));
+            g.FillEllipse(&centre, ox + 5.6f * s, oy + 5.6f * s, 4.8f * s, 4.8f * s);
+            break;
+        }
+
+        case VIcon_Palette:
+        {
+            // The app-theme setting: a circle with one half filled, the usual
+            // shorthand for light against dark.
+            g.DrawEllipse(&pen, ox + 2.4f * s, oy + 2.4f * s, 11.2f * s, 11.2f * s);
+            Gdiplus::GraphicsPath half;
+            half.AddArc(ox + 2.4f * s, oy + 2.4f * s, 11.2f * s, 11.2f * s, 90.0f, 180.0f);
+            half.CloseFigure();
+            g.FillPath(&brush, &half);
+            break;
+        }
+
+        case VIcon_Calculator:
+        {
+            // The app's own icon: a keypad with a display across the top.
+            Gdiplus::RectF body(ox + 3.0f * s, oy + 1.6f * s, 10.0f * s, 12.8f * s);
+            g.DrawRectangle(&pen, body);
+            g.DrawLine(&pen, P(5.0f, 5.4f), P(11.0f, 5.4f));
+            for (int row = 0; row < 2; ++row)
+            {
+                for (int col = 0; col < 3; ++col)
+                {
+                    g.FillEllipse(
+                        &brush, ox + (4.6f + static_cast<float>(col) * 2.4f) * s,
+                        oy + (7.8f + static_cast<float>(row) * 2.6f) * s, 1.4f * s, 1.4f * s);
+                }
+            }
+            break;
+        }
+
+        default:
+            break;
+        }
     }
 }
 
@@ -2369,7 +2672,8 @@ namespace
                 g.FillRectangle(&shade, 0, 0, width, height);
             }
 
-            RECT surface{ -slide, 0, width - slide, height };
+            const int paneWidth = (app.m_navPaneWidth > 0) ? app.m_navPaneWidth : width;
+            RECT surface{ -slide, 0, paneWidth - slide, height };
             Gdiplus::SolidBrush panel(ToGp(g_theme.dark ? Mix(g_theme.page, RGB(255, 255, 255), 0.04) : g_theme.card));
             g.FillRectangle(
                 &panel,
@@ -2385,6 +2689,70 @@ namespace
                 static_cast<INT>(surface.top),
                 static_cast<INT>(surface.right),
                 static_cast<INT>(surface.bottom));
+
+            if (nav)
+            {
+                // The WinUI selection indicator: a rounded accent bar on the
+                // leading edge of the selected item.
+                Gdiplus::SolidBrush accent(ToGp(g_theme.accent));
+                for (const Btn& b : app.m_navButtons)
+                {
+                    if (!b.checked || b.style != Style::Flat)
+                    {
+                        continue;
+                    }
+                    const int barHeight = Dp(16);
+                    const int centre = (b.rc.top + b.rc.bottom) / 2;
+                    const int left = surface.left + Dp(4);
+                    FillRounded(
+                        g, RECT{ left, centre - barHeight / 2, left + Dp(3), centre + barHeight / 2 }, Dp(1),
+                        g_theme.accent);
+                }
+
+                // And a scrollbar when the list is taller than the pane.
+                const int listTop = Dp(kNavRowDip);
+                const int listBottom = height - Dp(52);
+                const int visible = listBottom - listTop;
+                if (visible > 0 && app.m_navContentHeight > visible)
+                {
+                    const float span = static_cast<float>(app.m_navContentHeight);
+                    const int thumbHeight = (std::max)(Dp(24), static_cast<int>(static_cast<float>(visible) * static_cast<float>(visible) / span));
+                    const float maxScroll = span - static_cast<float>(visible);
+                    const float ratio = (maxScroll > 0.0f) ? (static_cast<float>(app.m_navScroll) / maxScroll) : 0.0f;
+                    const int travel = visible - thumbHeight;
+                    const int thumbTop = listTop + static_cast<int>(ratio * static_cast<float>(travel));
+                    const int right = surface.right - Dp(3);
+                    FillRounded(
+                        g, RECT{ right - Dp(2), thumbTop, right, thumbTop + thumbHeight }, Dp(1),
+                        g_theme.secondaryText);
+                }
+            }
+
+            if (settings)
+            {
+                // An open expander's panel is a card butted under its header.
+                const RECT panels[2] = { app.m_settingsThemePanel, app.m_settingsAboutPanel };
+                for (const RECT& panel : panels)
+                {
+                    if (panel.right <= panel.left)
+                    {
+                        continue;
+                    }
+                    RECT r = panel;
+                    r.left -= slide;
+                    r.right -= slide;
+                    FillRounded(g, r, Dp(6), g_theme.card);
+                    Gdiplus::Pen outline(ToGp(g_theme.divider));
+                    Gdiplus::GraphicsPath path;
+                    const int radius = Dp(6);
+                    path.AddArc(r.left, r.top, radius * 2, radius * 2, 180.0f, 90.0f);
+                    path.AddArc(r.right - radius * 2, r.top, radius * 2, radius * 2, 270.0f, 90.0f);
+                    path.AddArc(r.right - radius * 2, r.bottom - radius * 2, radius * 2, radius * 2, 0.0f, 90.0f);
+                    path.AddArc(r.left, r.bottom - radius * 2, radius * 2, radius * 2, 90.0f, 90.0f);
+                    path.CloseFigure();
+                    g.DrawPath(&outline, &path);
+                }
+            }
 
             for (size_t i = 0; i < app.m_navButtons.size(); ++i)
             {
@@ -2414,9 +2782,39 @@ namespace
             }
         }
 
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            for (const Btn& b : app.m_navButtons)
+            {
+                if (b.radio)
+                {
+                    RECT box{ b.rc.left + Dp(2), b.rc.top, b.rc.left + Dp(34), b.rc.bottom };
+                    DrawVectorIcon(g, box, b.checked ? VIcon_RadioOn : VIcon_RadioOff, b.checked ? g_theme.accent : g_theme.secondaryText, 19);
+                    continue;
+                }
+                const int id = (b.vicon != VIcon_None) ? b.vicon : VIconForGlyph(b.label);
+                if (id == VIcon_None)
+                {
+                    continue;
+                }
+                // An expander header carries its icon on the leading edge.
+                RECT box = b.rc;
+                if (b.style == Style::Card)
+                {
+                    box = RECT{ b.rc.left + Dp(14), b.rc.top, b.rc.left + Dp(46), b.rc.bottom };
+                }
+                DrawVectorIcon(g, box, id, ButtonText(b), (b.textDip > 0) ? b.textDip : 16);
+            }
+        }
+
         for (const Btn& b : app.m_navButtons)
         {
-            if (b.label.empty())
+            // A card or radio row draws its icon beside the label; everything
+            // else with an icon is icon-only, so its label is the glyph.
+            const bool iconOnly = (b.style != Style::Card && !b.radio)
+                && (b.vicon != VIcon_None || VIconForGlyph(b.label) != VIcon_None);
+            if (b.label.empty() || iconOnly)
             {
                 continue;
             }
@@ -2427,7 +2825,13 @@ namespace
             }
             else if (b.style == Style::Card)
             {
-                RECT text{ b.rc.left + Dp(16), b.rc.top + Dp(10), b.rc.right - Dp(40), b.rc.top + Dp(32) };
+                RECT text{ b.rc.left + Dp(52), b.rc.top + Dp(12), b.rc.right - Dp(44), b.rc.top + Dp(34) };
+                DrawLabel(hdc, text, b.label, 14, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            else if (b.radio)
+            {
+                RECT text = b.rc;
+                text.left += Dp(38);
                 DrawLabel(hdc, text, b.label, 14, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             }
             else
@@ -2454,65 +2858,84 @@ namespace
                 RECT glyph = entry.rc;
                 glyph.left += Dp(10);
                 glyph.right = glyph.left + Dp(28);
-                DrawLabel(hdc, glyph, entry.glyph, 15, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                const int id = VIconForGlyph(entry.glyph);
+                if (id != VIcon_None)
+                {
+                    Gdiplus::Graphics g(hdc);
+                    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                    DrawVectorIcon(g, glyph, id, g_theme.primaryText, 16);
+                }
+                else
+                {
+                    DrawLabel(hdc, glyph, entry.glyph, 15, g_theme.primaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                }
             }
             return;
         }
 
-        RECT title{ Dp(14) - slide, Dp(48), width - Dp(14) - slide, Dp(84) };
-        DrawLabel(hdc, title, L"Settings", 24, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
+        RECT title{ Dp(24) - slide, Dp(48), width - Dp(24) - slide, Dp(96) };
+        DrawLabel(hdc, title, L"Settings", kTitleDip, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD, 1);
 
-        RECT appearance{ Dp(14) - slide, Dp(96), width - Dp(14) - slide, Dp(120) };
-        DrawLabel(hdc, appearance, L"Appearance", 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+        const auto shifted = [&](RECT r) {
+            r.left -= slide;
+            r.right -= slide;
+            return r;
+        };
 
-        RECT aboutHeader{ Dp(14) - slide, Dp(254), width - Dp(14) - slide, Dp(278) };
-        DrawLabel(hdc, aboutHeader, L"About", 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+        // BodyStrongTextBlockStyle: body size, semibold.
+        DrawLabel(
+            hdc, shifted(app.m_settingsAppearanceRect), L"Appearance", 14, g_theme.primaryText, false,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+        DrawLabel(
+            hdc, shifted(app.m_settingsAboutRect), L"About", 14, g_theme.primaryText, false,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
 
-        // Subtitles and chevrons belonging to the cards laid out above.
+        // Each expander header carries a description under its title and a
+        // chevron that flips when the panel is open.
         for (const Btn& b : app.m_navButtons)
         {
             if (b.style != Style::Card)
             {
                 continue;
             }
-            const wchar_t* subtitle = nullptr;
-            if (b.action == ACT_APP_THEME)
-            {
-                subtitle = (app.m_themeChoice == 1) ? L"Light" : (app.m_themeChoice == 2) ? L"Dark" : L"Use system setting";
-            }
-            else if (b.action == ACT_ALWAYS_ON_TOP)
-            {
-                subtitle = app.m_alwaysOnTop ? L"On" : L"Off";
-            }
-            else if (b.action == ACT_NONE)
-            {
-                subtitle = L"\u00a9 Microsoft Corporation. Licensed under the MIT License.";
-            }
+            const bool isTheme = (b.action == ACT_APP_THEME);
+            const wchar_t* subtitle = isTheme
+                ? L"Select which app theme to display"
+                : L"\u00a9 Microsoft Corporation. MIT Licensed.";
 
-            if (subtitle != nullptr)
+            RECT line{ b.rc.left + Dp(52), b.rc.top + Dp(33), b.rc.right - Dp(44), b.rc.top + Dp(53) };
+            DrawLabel(hdc, line, subtitle, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+
+            const bool open = isTheme ? app.m_themeExpanded : app.m_aboutExpanded;
+            RECT chevron{ b.rc.right - Dp(38), b.rc.top, b.rc.right - Dp(12), b.rc.bottom };
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            DrawVectorIcon(g, chevron, open ? VIcon_ChevronUp : VIcon_ChevronDown, g_theme.secondaryText, 14);
+        }
+
+        // The version sits where the About expander's own content does.
+        for (const Btn& b : app.m_navButtons)
+        {
+            if (b.style == Style::Card && b.action == ACT_ABOUT_EXPAND)
             {
-                // Only the expander cards reserve room for a chevron on the right.
-                const int inset = (b.action == ACT_NONE) ? Dp(16) : Dp(40);
-                RECT line{ b.rc.left + Dp(16), b.rc.top + Dp(30), b.rc.right - inset, b.rc.top + Dp(50) };
-                DrawLabel(hdc, line, subtitle, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
-            }
-            if (b.action == ACT_NONE)
-            {
-                RECT version{ b.rc.left + Dp(16), b.rc.top + Dp(48), b.rc.right - Dp(16), b.rc.top + Dp(68) };
-                DrawLabel(hdc, version, L"Version 1.0.0.0", 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-            }
-            else
-            {
-                RECT chevron{ b.rc.right - Dp(34), b.rc.top, b.rc.right - Dp(10), b.rc.bottom };
-                DrawLabel(hdc, chevron, L"", 11, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                RECT version{ b.rc.left + Dp(52), b.rc.top + Dp(51), b.rc.right - Dp(44), b.rc.top + Dp(71) };
+                DrawLabel(hdc, version, L"1.0.0.0", 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
             }
         }
 
-        RECT feedback{ Dp(14) - slide, Dp(374), width - Dp(14) - slide, Dp(398) };
-        DrawLabel(hdc, feedback, L"Built from the Windows Calculator engine", 13, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        DrawLabel(
+            hdc, shifted(app.m_settingsFeedbackRect), L"Send feedback", 14, g_theme.accent, false,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
-        RECT source{ Dp(14) - slide, Dp(396), width - Dp(14) - slide, Dp(420) };
-        DrawLabel(hdc, source, L"github.com/microsoft/calculator", 13, g_theme.accent, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        // The closing paragraph wraps, with GitHub set as a link on its last line.
+        RECT contribute = shifted(app.m_settingsContributeRect);
+        DrawLabel(
+            hdc, contribute, L"To learn how you can contribute to Windows Calculator, check out the project on", 14,
+            g_theme.primaryText, false, DT_WORDBREAK | DT_LEFT | DT_TOP);
+        RECT linkRect = contribute;
+        linkRect.top = contribute.bottom;
+        linkRect.bottom = linkRect.top + Dp(22);
+        DrawLabel(hdc, linkRect, L"GitHub.", 14, g_theme.accent, false, DT_SINGLELINE | DT_LEFT | DT_TOP);
     }
 
     // Everything below the overlay surfaces. Split out so a mode change can
@@ -2553,11 +2976,32 @@ namespace
             }
         }
 
+        // --- vector icons --------------------------------------------------
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            for (size_t i = 0; i < app.m_buttons.size(); ++i)
+            {
+                const Btn& b = app.m_buttons[i];
+                const int id = (b.vicon != VIcon_None) ? b.vicon : VIconForGlyph(b.label);
+                if (id == VIcon_None)
+                {
+                    continue;
+                }
+                float hot = 0.0f;
+                float pressed = 0.0f;
+                ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
+                DrawVectorIcon(g, PressedRect(b.rc, pressed), id, ButtonText(b), (b.textDip > 0) ? b.textDip : 16);
+            }
+        }
+
         // --- text ---------------------------------------------------------
         for (size_t i = 0; i < app.m_buttons.size(); ++i)
         {
             const Btn& b = app.m_buttons[i];
-            if (b.label.empty())
+            const bool iconOnly = (b.style != Style::Card && !b.radio)
+                && (b.vicon != VIcon_None || VIconForGlyph(b.label) != VIcon_None);
+            if (b.label.empty() || iconOnly)
             {
                 continue;
             }
@@ -2576,7 +3020,9 @@ namespace
                 text.right -= Dp(30);
                 DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
                 RECT chevron{ rc.right - Dp(28), rc.top, rc.right - Dp(8), rc.bottom };
-                DrawLabel(hdc, chevron, L"\ue70d", dip - 2, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                Gdiplus::Graphics g(hdc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                DrawVectorIcon(g, chevron, VIcon_ChevronDown, g_theme.secondaryText, 14);
             }
             else if (b.dateField)
             {
@@ -2585,7 +3031,9 @@ namespace
                 text.right -= Dp(36);
                 DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
                 RECT glyph{ rc.right - Dp(32), rc.top, rc.right - Dp(6), rc.bottom };
-                DrawLabel(hdc, glyph, L"", 15, g_theme.secondaryText, true, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                Gdiplus::Graphics g(hdc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                DrawVectorIcon(g, glyph, VIcon_Calendar, g_theme.secondaryText, 16);
             }
             else if (b.icon)
             {
@@ -2609,8 +3057,9 @@ namespace
 
         // Mode name beside the navigation button.
         {
-            RECT title{ Dp(50), Dp(4), width - Dp(50), Dp(42) };
-            DrawLabel(hdc, title, app.ModeName(), 15, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
+            DrawLabel(
+                hdc, app.m_titleRect, app.ModeName(), kTitleDip, g_theme.primaryText, false,
+                DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_SEMIBOLD);
         }
 
         if (app.m_mode == Mode::Converter)
@@ -3458,7 +3907,19 @@ namespace
             app.Relayout();
             break;
         case ACT_APP_THEME:
-            app.m_themeChoice = (app.m_themeChoice + 1) % 3;
+            // The shipping settings page expands to show the choices rather than
+            // cycling the theme on every click.
+            app.m_themeExpanded = !app.m_themeExpanded;
+            app.Relayout();
+            break;
+        case ACT_ABOUT_EXPAND:
+            app.m_aboutExpanded = !app.m_aboutExpanded;
+            app.Relayout();
+            break;
+        case ACT_THEME_LIGHT:
+        case ACT_THEME_DARK:
+        case ACT_THEME_SYSTEM:
+            app.m_themeChoice = (action == ACT_THEME_LIGHT) ? 1 : (action == ACT_THEME_DARK) ? 2 : 0;
             g_themeOverride = app.m_themeChoice;
             LoadTheme();
             ApplyTitleBarTheme(app.m_hwnd);
@@ -4120,20 +4581,6 @@ namespace
                 app.EnsureFrameTimer();
                 app.Invalidate();
             }
-            else if (wParam == 2)
-            {
-                // Animations that move controls also move their hit targets, so
-                // those frames relayout rather than just repaint.
-                if (app.m_navAnim.Active() || app.m_settingsAnim.Active() || app.m_panelAnim.Active())
-                {
-                    app.Relayout();
-                }
-                else
-                {
-                    app.Invalidate();
-                }
-                app.EnsureFrameTimer();
-            }
             return 0;
 
         case WM_CHAR:
@@ -4266,11 +4713,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     ShowWindow(hwnd, showCommand);
     UpdateWindow(hwnd);
 
+    // While something is animating, frames are paced against the compositor
+    // rather than by WM_TIMER, whose 15.6ms granularity, low priority and
+    // coalescing are what make timer-driven motion look like it stutters. The
+    // loop goes back to blocking on GetMessage as soon as everything settles.
     MSG message{};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0)
+    bool running = true;
+    while (running)
     {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+        if (!g_app.AnimationsRunning())
+        {
+            if (GetMessageW(&message, nullptr, 0, 0) <= 0)
+            {
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            continue;
+        }
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (message.message == WM_QUIT)
+            {
+                running = false;
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (!running)
+        {
+            break;
+        }
+
+        g_app.FrameTick();
+        if (FAILED(DwmFlush()))
+        {
+            Sleep(8); // composition is off; fall back to a fixed cadence
+        }
     }
 
     ClearFontCache();
@@ -4486,16 +4967,18 @@ namespace
         { L"Standard", L"", ACT_MODE_STANDARD, false },
         { L"Scientific", L"", ACT_MODE_SCIENTIFIC, false },
         { L"Programmer", L"", ACT_MODE_PROGRAMMER, false },
-        { L"Date Calculation", L"", ACT_MODE_DATE, false },
+        { L"Date calculation", L"", ACT_MODE_DATE, false },
     };
 
     void CalcApp::BuildNavLayout(int width, int height)
     {
         const int pad = Dp(kPadDip);
         const int rowHeight = Dp(38);
-        // The pane slides in from the left edge, the way a WinUI NavigationView
-        // overlay does.
-        m_navSlide = width - static_cast<int>(static_cast<float>(width) * m_navAnim.Value());
+        // A NavigationView overlay pane is SplitViewOpenPaneLength wide, not the
+        // whole window, so the content stays visible beside it under the scrim.
+        const int paneWidth = (std::min)(Dp(kNavPaneDip), width);
+        m_navPaneWidth = paneWidth;
+        m_navSlide = paneWidth - static_cast<int>(static_cast<float>(paneWidth) * m_navAnim.Value());
 
         Btn close;
         close.label = L"";
@@ -4523,7 +5006,7 @@ namespace
                 row.checked = current;
                 row.textDip = header ? 12 : 14;
                 row.leftAlign = true;
-                row.rc = { pad + Dp(8), y, width - Dp(8), y + rowHeight - Dp(2) };
+                row.rc = { pad + Dp(8), y, paneWidth - Dp(8), y + rowHeight - Dp(2) };
                 RECT glyphRect = row.rc;
                 glyphRect.left -= m_navSlide;
                 glyphRect.right -= m_navSlide;
@@ -4564,7 +5047,7 @@ namespace
         settings.style = Style::Flat;
         settings.textDip = 14;
         settings.leftAlign = true;
-        settings.rc = { pad + Dp(8), height - Dp(44), width - Dp(8), height - Dp(8) };
+        settings.rc = { pad + Dp(8), height - Dp(44), paneWidth - Dp(8), height - Dp(8) };
         RECT settingsGlyph = settings.rc;
         settingsGlyph.left -= m_navSlide;
         settingsGlyph.right -= m_navSlide;
@@ -4575,43 +5058,116 @@ namespace
     void CalcApp::BuildSettingsLayout(int width, int height)
     {
         const int pad = Dp(kPadDip);
+        m_navPaneWidth = width; // the settings page covers the whole window
         m_navSlide = width - static_cast<int>(static_cast<float>(width) * m_settingsAnim.Value());
 
         Btn back;
-        back.label = L"";
         back.action = ACT_SETTINGS;
         back.style = Style::Flat;
-        back.icon = true;
+        back.vicon = VIcon_Back;
         back.textDip = 14;
-        back.rc = { pad + Dp(2), pad + Dp(2), pad + Dp(42), pad + Dp(38) };
+        back.rc = { Dp(2), Dp(2), Dp(46), Dp(46) };
         PushNav(back);
 
-        // Two cards under their section headers, as the shipping settings page
-        // lays them out.
+        // Settings.xaml pads its content by 24 and spaces the cards by 4.
+        const int left = Dp(24);
+        const int right = width - Dp(24);
+        const int spacing = Dp(4);
+
+        // Row 0 is the back button, row 1 the 48px "Settings" header, then the
+        // scrolling content: each group title has Margin 0,12,0,4 above its card.
+        const int contentTop = Dp(48) + Dp(48);
+        m_settingsAppearanceRect = { left, contentTop + Dp(12), right, contentTop + Dp(32) };
+        int y = contentTop + Dp(36);
+
+        // --- App theme expander -------------------------------------------
         Btn theme;
         theme.label = L"App theme";
         theme.action = ACT_APP_THEME;
         theme.style = Style::Card;
         theme.textDip = 14;
-        theme.rc = { Dp(14), Dp(122), width - Dp(14), Dp(178) };
+        theme.vicon = VIcon_Palette;
+        theme.rc = { left, y, right, y + Dp(64) };
         PushNav(theme);
+        y += Dp(64);
+
+        if (m_themeExpanded)
+        {
+            // The expanded panel is a second card butted against the first,
+            // holding the three choices as radio buttons.
+            const int rowHeight = Dp(40);
+            m_settingsThemePanel = { left, y, right, y + rowHeight * 3 + Dp(8) };
+            int rowY = y + Dp(4);
+            const int actions[3] = { ACT_THEME_LIGHT, ACT_THEME_DARK, ACT_THEME_SYSTEM };
+            static const wchar_t* const names[3] = { L"Light", L"Dark", L"Use system setting" };
+            const int selected = (m_themeChoice == 1) ? 0 : (m_themeChoice == 2) ? 1 : 2;
+            for (int i = 0; i < 3; ++i)
+            {
+                Btn choice;
+                choice.label = names[i];
+                choice.action = actions[i];
+                choice.style = Style::Bit; // hover fill only, like a list row
+                choice.textDip = 14;
+                choice.checked = (i == selected);
+                choice.radio = true;
+                choice.rc = { left + Dp(8), rowY, right - Dp(8), rowY + rowHeight - Dp(2) };
+                PushNav(choice);
+                rowY += rowHeight;
+            }
+            y = m_settingsThemePanel.bottom;
+        }
+        else
+        {
+            m_settingsThemePanel = RECT{ 0, 0, 0, 0 };
+        }
+
+        // --- About --------------------------------------------------------
+        y += Dp(26);
+        m_settingsAboutRect = { left, y, right, y + Dp(20) };
+        y += Dp(24);
 
         Btn about;
         about.label = L"Calculator";
-        about.action = ACT_NONE;
+        about.action = ACT_ABOUT_EXPAND;
         about.style = Style::Card;
-        about.enabled = false;
         about.textDip = 14;
-        about.rc = { Dp(14), Dp(286), width - Dp(14), Dp(360) };
+        about.vicon = VIcon_Calculator;
+        about.rc = { left, y, right, y + Dp(76) };
         PushNav(about);
+        y += Dp(76);
 
-        Btn alwaysOnTop;
-        alwaysOnTop.label = L"Always on top";
-        alwaysOnTop.action = ACT_ALWAYS_ON_TOP;
-        alwaysOnTop.style = Style::Card;
-        alwaysOnTop.textDip = 14;
-        alwaysOnTop.rc = { Dp(14), Dp(186), width - Dp(14), Dp(242) };
-        PushNav(alwaysOnTop);
+        if (m_aboutExpanded)
+        {
+            const int rowHeight = Dp(30);
+            m_settingsAboutPanel = { left, y, right, y + rowHeight * 3 + Dp(10) };
+            int rowY = y + Dp(6);
+            static const wchar_t* const links[3] = {
+                L"Microsoft Software License Terms", L"Microsoft Services Agreement", L"Microsoft Privacy Statement"
+            };
+            for (int i = 0; i < 3; ++i)
+            {
+                Btn link;
+                link.label = links[i];
+                link.action = ACT_NONE;
+                link.style = Style::Bit;
+                link.enabled = false;
+                link.textDip = 14;
+                link.accentText = true;
+                link.rc = { left + Dp(8), rowY, right - Dp(8), rowY + rowHeight - Dp(2) };
+                PushNav(link);
+                rowY += rowHeight;
+            }
+            y = m_settingsAboutPanel.bottom;
+        }
+        else
+        {
+            m_settingsAboutPanel = RECT{ 0, 0, 0, 0 };
+        }
+
+        y += spacing + Dp(8);
+        m_settingsFeedbackRect = { left, y, right, y + Dp(22) };
+        y += Dp(22) + Dp(9);
+        m_settingsContributeRect = { left, y, right, y + Dp(44) };
 
         m_navContentHeight = height;
     }

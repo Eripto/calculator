@@ -55,7 +55,13 @@ entering.
 | History / memory panel | Slides in from the right when docked, upward when it covers the keypad |
 | Every key | Hover cross-fades between keys; pointer-down shrinks the key slightly and fades the pressed fill in |
 
-Two implementation notes. Animated values are computed from the clock on demand
+Frames are paced against the compositor with `DwmFlush` from the message loop,
+not by `WM_TIMER`. A timer's 15.6ms granularity, low priority and coalescing are
+what make timer-driven motion look like it stutters; the loop goes back to
+blocking on `GetMessage` as soon as everything settles, so an idle window costs
+nothing.
+
+Two further implementation notes. Animated values are computed from the clock on demand
 rather than stepped, so a dropped frame never leaves an animation stranded
 part-way. And because GDI text has no alpha of its own, the transitions that
 need a true fade (mode change, flyouts) render to an offscreen layer and
@@ -77,6 +83,25 @@ corrected where it diverged:
 | Settings | Rebuilt as cards under "Appearance" and "About" section headers, replacing a flat list of rows |
 | Combo boxes | Unit pickers and the date-mode picker anchor their text to the leading edge with the chevron at the trailing one, instead of centring both |
 | Glyphs | `M−` uses a real minus sign (U+2212), not a hyphen |
+| Title bar | Hamburger, mode name in `SubtitleTextBlockStyle` (20px semibold), then the keep-on-top button immediately after the title, as `MainPage.xaml` lays it out. History is the only trailing item |
+| Navigation pane | `SplitViewOpenPaneLength` (256px) rather than the full window, so the keypad stays visible beside it; WinUI selection indicator (a 3x16 accent bar on the leading edge) and a scrollbar |
+| Settings | The app theme is a `SettingsExpander` holding Light / Dark / Use system setting radio buttons, so clicking the card expands it instead of cycling the theme. About expands to the licence links, and the page closes with the "Send feedback" link and the contribute paragraph |
+| Chrome icons | Drawn as paths rather than font glyphs (see below) |
+
+### Why the chrome icons are vector paths
+
+The hamburger, back arrow, history, keep-on-top, backspace, chevrons, calendar,
+gear, radio buttons and the two settings header icons are drawn with GDI+ paths
+on a 16x16 grid, the same grid the icon fonts are designed on.
+
+Font glyphs were the obvious choice and the wrong one. `Segoe Fluent Icons` and
+`Segoe MDL2 Assets` do not carry every codepoint on every machine, and the
+text-presentation characters the code fell back on can be substituted by a
+colour emoji font -- which puts blue and orange into a title bar that is
+supposed to be monochrome. Paths render identically everywhere and cannot be
+recoloured by font substitution. The navigation pane's category icons still come
+from the icon font, and their codepoints match `NavCategory.cs` exactly.
+
 
 ## Building
 
