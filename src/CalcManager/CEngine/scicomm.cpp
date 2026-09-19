@@ -13,9 +13,14 @@
 * Author:
 \****************************************************************************/
 
-#include <iomanip>
+// Must precede <cstdlib> so the CRT declares rand_s.
+#if defined(_WIN32)
+#define _CRT_RAND_S
+#endif
+
+#include <array>
+#include <cstdlib>
 #include <string>
-#include <sstream>
 #include "Header Files/CalcEngine.h"
 #include "Header Files/CalcUtils.h"
 
@@ -784,10 +789,20 @@ void CCalcEngine::ProcessCommandWorker(OpCode wParam)
         {
             CheckAndAddLastBinOpToHistory(); // rand is like entering the number
 
-            wstringstream str;
-            str << fixed << setprecision(m_precision) << GenerateRandomNumber();
+            // Fixed-point with m_precision fraction digits, replacing the
+            // wstringstream this used to build -- that version linked the whole
+            // iostream and locale machinery into every binary using the engine.
+            // The generated value is always a multiple of 2^-53 in [0, 1), so the
+            // exact path below applies and reproduces every digit; FixedPoint is
+            // only a guard for values that path cannot represent.
+            const double randomValue = GenerateRandomNumber();
+            wstring randomNumber;
+            if (!CalcEngine::NumericString::TryExactFixedPointBelowOne(randomValue, m_precision, randomNumber))
+            {
+                randomNumber = CalcEngine::NumericString::FixedPoint(randomValue, m_precision);
+            }
 
-            auto rat = StringToRat(false, str.str(), false, L"", m_radix, m_precision);
+            auto rat = StringToRat(false, randomNumber, false, L"", m_radix, m_precision);
             if (rat != nullptr)
             {
                 m_currentVal = Rational{ rat };
@@ -990,22 +1005,35 @@ void CCalcEngine::DisplayAnnounceBinaryOperator()
 // we have this separate table to get its localized name and for its Inv function if it exists.
 struct FunctionNameElement
 {
-    wstring degreeString;        // Used by default if there are no rad or grad specific strings.
-    wstring inverseDegreeString; // Will fall back to degreeString if empty
+    // These hold resource ids (string literals from EngineStrings.h), never
+    // owned text. Plain pointers rather than wstring_view or wstring: the table
+    // below is constant data either way, but this halves its size and drops the
+    // per-field relocations, which is worth a couple of KB across 35 entries.
+    const wchar_t* degreeString = L"";        // Used by default if there are no rad or grad specific strings.
+    const wchar_t* inverseDegreeString = L""; // Will fall back to degreeString if empty
 
-    wstring radString;
-    wstring inverseRadString; // Will fall back to radString if empty
+    const wchar_t* radString = L"";
+    const wchar_t* inverseRadString = L""; // Will fall back to radString if empty
 
-    wstring gradString;
-    wstring inverseGradString; // Will fall back to gradString if empty
+    const wchar_t* gradString = L"";
+    const wchar_t* inverseGradString = L""; // Will fall back to gradString if empty
 
-    wstring programmerModeString;
+    const wchar_t* programmerModeString = L"";
 
-    bool hasAngleStrings = ((!radString.empty()) || (!inverseRadString.empty()) || (!gradString.empty()) || (!inverseGradString.empty()));
+    bool hasAngleStrings = (*radString != L'\0') || (*inverseRadString != L'\0') || (*gradString != L'\0') || (*inverseGradString != L'\0');
 };
 
-// Table for each unary operator
-static const std::unordered_map<int, FunctionNameElement> operatorStringTable = {
+struct OperatorStringEntry
+{
+    int opCode;
+    FunctionNameElement names;
+};
+
+// Table for each unary operator. A flat constexpr array rather than a hash map:
+// it lives entirely in read-only data, so there is no start-up construction and
+// no hashtable instantiation, and a scan of 35 entries is not measurable beside
+// the arbitrary-precision arithmetic it feeds.
+static constexpr std::array<OperatorStringEntry, 35> operatorStringTable = { {
     { IDC_CHOP, { L"", SIDS_FRAC } },
 
     { IDC_SIN, { SIDS_SIND, SIDS_ASIND, SIDS_SINR, SIDS_ASINR, SIDS_SING, SIDS_ASING } },
@@ -1044,16 +1072,28 @@ static const std::unordered_map<int, FunctionNameElement> operatorStringTable = 
     { IDC_ROLC, { SIDS_ROL } },
     { IDC_CUBEROOT, { SIDS_CUBEROOT } },
     { IDC_MOD, { SIDS_MOD, L"", L"", L"", L"", L"", SIDS_PROGRAMMER_MOD } },
-};
+} };
+
+static const FunctionNameElement* FindOperatorStrings(int opCode)
+{
+    for (const auto& entry : operatorStringTable)
+    {
+        if (entry.opCode == opCode)
+        {
+            return &entry.names;
+        }
+    }
+    return nullptr;
+}
 
 wstring_view CCalcEngine::OpCodeToUnaryString(int nOpCode, bool fInv, AngleType angletype)
 {
     // Try to lookup the ID in the UFNE table
-    wstring ids = L"";
+    wstring_view ids;
 
-    if (auto pair = operatorStringTable.find(nOpCode); pair != operatorStringTable.end())
+    if (const FunctionNameElement* entry = FindOperatorStrings(nOpCode); entry != nullptr)
     {
-        const FunctionNameElement& element = pair->second;
+        const FunctionNameElement& element = *entry;
         if (!element.hasAngleStrings || AngleType::Degrees == angletype)
         {
             if (fInv)
@@ -1102,17 +1142,17 @@ wstring_view CCalcEngine::OpCodeToUnaryString(int nOpCode, bool fInv, AngleType 
 wstring_view CCalcEngine::OpCodeToBinaryString(int nOpCode, bool isIntegerMode)
 {
     // Try to lookup the ID in the UFNE table
-    wstring ids = L"";
+    wstring_view ids;
 
-    if (auto pair = operatorStringTable.find(nOpCode); pair != operatorStringTable.end())
+    if (const FunctionNameElement* entry = FindOperatorStrings(nOpCode); entry != nullptr)
     {
-        if (isIntegerMode && !pair->second.programmerModeString.empty())
+        if (isIntegerMode && *entry->programmerModeString != L'\0')
         {
-            ids = pair->second.programmerModeString;
+            ids = entry->programmerModeString;
         }
         else
         {
-            ids = pair->second.degreeString;
+            ids = entry->degreeString;
         }
     }
 
@@ -1196,8 +1236,29 @@ double CCalcEngine::GenerateRandomNumber()
 {
     if (m_randomGeneratorEngine == nullptr)
     {
+#if defined(_WIN32)
+        // Seed from the OS cryptographic RNG. std::random_device serves the
+        // same purpose, but libstdc++ reports its failures with
+        // std::runtime_error, and that single reference pulls <stdexcept> and
+        // the narrow std::string instantiations into every binary that links
+        // the engine (~60KB).
+        std::array<unsigned int, 8> entropy{};
+        for (auto& word : entropy)
+        {
+            if (rand_s(&word) != 0)
+            {
+                // rand_s only fails when the OS RNG is unavailable; prefer
+                // weak entropy over a fixed seed.
+                static unsigned int counter = 0;
+                word = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(&word)) ^ (++counter * 2654435761u);
+            }
+        }
+        std::seed_seq sequence(entropy.begin(), entropy.end());
+        m_randomGeneratorEngine = std::make_unique<std::mt19937>(sequence);
+#else
         random_device rd;
         m_randomGeneratorEngine = std::make_unique<std::mt19937>(rd());
+#endif
         m_distr = std::make_unique<std::uniform_real_distribution<>>(0, 1);
     }
     return (*m_distr.get())(*m_randomGeneratorEngine.get());

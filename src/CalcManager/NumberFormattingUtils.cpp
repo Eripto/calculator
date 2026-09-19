@@ -1,4 +1,11 @@
-#include "pch.h"
+// Deliberately not including pch.h: it pulls <regex>, <sstream> and <iostream>,
+// and with libstdc++ those alone add several hundred KB of locale and stream
+// machinery to anything that links the engine.
+#include <algorithm> // for std::max
+#include <cmath>     // for log10, abs
+#include <string>
+
+#include "Header Files/NumericString.h"
 #include "NumberFormattingUtils.h"
 
 using namespace std;
@@ -60,11 +67,7 @@ namespace UnitConversionManager::NumberFormattingUtils
     /// <param name="numSignificant">unsigned int number of significant digits to round to</param>
     wstring RoundSignificantDigits(double num, unsigned int numSignificant)
     {
-        wstringstream out(wstringstream::out);
-        out << fixed;
-        out.precision(numSignificant);
-        out << num;
-        return out.str();
+        return CalcEngine::NumericString::FixedPoint(num, static_cast<int>(numSignificant));
     }
 
     /// <summary>
@@ -73,8 +76,6 @@ namespace UnitConversionManager::NumberFormattingUtils
     /// <param name="number">number to convert</param>
     wstring ToScientificNumber(double number)
     {
-        wstringstream out(wstringstream::out);
-        out << scientific << number;
-        return out.str();
+        return CalcEngine::NumericString::Scientific(number);
     }
 }

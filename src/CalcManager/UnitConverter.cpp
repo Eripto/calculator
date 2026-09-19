@@ -7,10 +7,13 @@
 #include <algorithm> // for std::sort
 #include "Command.h"
 #include "UnitConverter.h"
+#include "Header Files/NumericString.h"
 #include "NumberFormattingUtils.h"
 
 using namespace std;
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
 using namespace concurrency;
+#endif
 using namespace UnitConversionManager;
 using namespace UnitConversionManager::NumberFormattingUtils;
 
@@ -204,9 +207,9 @@ bool UnitConversionManager::UnitConverter::IsSwitchedActive() const
 
 wstring UnitConverter::CategoryToString(const Category& c, wstring_view delimiter)
 {
-    return Quote(std::to_wstring(c.id))
+    return Quote(CalcEngine::NumericString::FromInteger(c.id))
         .append(delimiter)
-        .append(Quote(std::to_wstring(c.supportsNegative)))
+        .append(Quote(CalcEngine::NumericString::FromInteger(c.supportsNegative)))
         .append(delimiter)
         .append(Quote(c.name))
         .append(delimiter);
@@ -232,17 +235,17 @@ vector<wstring> UnitConverter::StringToVector(wstring_view w, wstring_view delim
 }
 wstring UnitConverter::UnitToString(const Unit& u, wstring_view delimiter)
 {
-    return Quote(std::to_wstring(u.id))
+    return Quote(CalcEngine::NumericString::FromInteger(u.id))
         .append(delimiter)
         .append(Quote(u.name))
         .append(delimiter)
         .append(Quote(u.abbreviation))
         .append(delimiter)
-        .append(std::to_wstring(u.isConversionSource))
+        .append(CalcEngine::NumericString::FromInteger(u.isConversionSource))
         .append(delimiter)
-        .append(std::to_wstring(u.isConversionTarget))
+        .append(CalcEngine::NumericString::FromInteger(u.isConversionTarget))
         .append(delimiter)
-        .append(std::to_wstring(u.isWhimsical))
+        .append(CalcEngine::NumericString::FromInteger(u.isWhimsical))
         .append(delimiter);
 }
 
@@ -556,6 +559,7 @@ void UnitConverter::SetViewModelCurrencyCallback(_In_ const shared_ptr<IViewMode
     }
 }
 
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
 task<pair<bool, wstring>> UnitConverter::RefreshCurrencyRatios()
 {
     shared_ptr<ICurrencyConverterDataLoader> currencyDataLoader = GetCurrencyConverterDataLoader();
@@ -579,10 +583,18 @@ task<pair<bool, wstring>> UnitConverter::RefreshCurrencyRatios()
         return make_pair(didLoad, timestamp);
     });
 }
+#endif // CALC_SUPPORTS_CURRENCY_ASYNC
 
 shared_ptr<ICurrencyConverterDataLoader> UnitConverter::GetCurrencyConverterDataLoader()
 {
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
     return dynamic_pointer_cast<ICurrencyConverterDataLoader>(m_currencyDataLoader);
+#else
+    // Without the asynchronous loader there is no currency category, so
+    // m_currencyDataLoader is never set and the cast has nothing to find.
+    // Avoiding dynamic_pointer_cast also lets the engine build with -fno-rtti.
+    return nullptr;
+#endif
 }
 
 /// <summary>
@@ -621,7 +633,7 @@ vector<tuple<wstring, Unit>> UnitConverter::CalculateSuggested()
     {
         if (cur.first != m_fromType && cur.first != m_toType)
         {
-            double convertedValue = Convert(stod(m_currentDisplay), cur.second);
+            double convertedValue = Convert(CalcEngine::NumericString::ToDouble(m_currentDisplay), cur.second);
             SuggestedValueIntermediate newEntry;
             newEntry.magnitude = log10(convertedValue);
             newEntry.value = convertedValue;
@@ -661,7 +673,7 @@ vector<tuple<wstring, Unit>> UnitConverter::CalculateSuggested()
         {
             roundedString = RoundSignificantDigits(entry.value, 0U);
         }
-        if (stod(roundedString) != 0.0 || m_currentCategory.supportsNegative)
+        if (CalcEngine::NumericString::ToDouble(roundedString) != 0.0 || m_currentCategory.supportsNegative)
         {
             TrimTrailingZeros(roundedString);
             returnVector.emplace_back(roundedString, entry.type);
@@ -701,7 +713,7 @@ vector<tuple<wstring, Unit>> UnitConverter::CalculateSuggested()
         }
 
         // How to work out which is the best whimsical value to add to the vector?
-        if (stod(roundedString) != 0.0)
+        if (CalcEngine::NumericString::ToDouble(roundedString) != 0.0)
         {
             TrimTrailingZeros(roundedString);
             whimsicalReturnVector.emplace_back(roundedString, entry.type);
@@ -882,7 +894,7 @@ void UnitConverter::Calculate()
     }
     else
     {
-        double currentValue = stod(m_currentDisplay);
+        double currentValue = CalcEngine::NumericString::ToDouble(m_currentDisplay);
         const double returnValue = Convert(currentValue, conversionTable[m_toType]);
 
         const auto isCurrencyConverter = m_currencyDataLoader != nullptr && m_currencyDataLoader->SupportsCategory(this->m_currentCategory);

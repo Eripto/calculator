@@ -19,8 +19,8 @@
 
 #include <algorithm>
 #include "winerror_cross_platform.h"
-#include <sstream>
-#include <cstring> // for memmove, memcpy
+#include <cstring>  // for memmove, memcpy
+#include <cwctype>  // for towupper
 #include "ratpak.h"
 
 using namespace std;

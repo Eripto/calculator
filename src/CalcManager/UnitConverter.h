@@ -5,7 +5,19 @@
 
 #include <vector>
 #include <unordered_map>
+
+// Fetching live currency ratios is asynchronous and is expressed with the MSVC
+// Parallel Patterns Library. Toolchains without PPL can still build the rest of
+// the converter -- every non-currency category is synchronous -- by leaving
+// CALC_SUPPORTS_CURRENCY_ASYNC undefined.
+#if !defined(CALC_SUPPORTS_CURRENCY_ASYNC) && defined(_MSC_VER)
+#define CALC_SUPPORTS_CURRENCY_ASYNC 1
+#endif
+
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
 #include <ppltasks.h>
+#endif
+
 #include "sal_cross_platform.h" // for SAL
 #include <memory>               // for std::shared_ptr
 
@@ -195,9 +207,11 @@ namespace UnitConversionManager
         GetCurrencyRatioEquality(_In_ const UnitConversionManager::Unit& unit1, _In_ const UnitConversionManager::Unit& unit2) = 0;
         virtual std::wstring GetCurrencyTimestamp() = 0;
 
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
         virtual concurrency::task<bool> TryLoadDataFromCacheAsync() = 0;
         virtual concurrency::task<bool> TryLoadDataFromWebAsync() = 0;
         virtual concurrency::task<bool> TryLoadDataFromWebOverrideAsync() = 0;
+#endif
     };
 
     class IUnitConverterVMCallback
@@ -227,7 +241,9 @@ namespace UnitConversionManager
         virtual void SendCommand(Command command) = 0;
         virtual void SetViewModelCallback(_In_ const std::shared_ptr<IUnitConverterVMCallback>& newCallback) = 0;
         virtual void SetViewModelCurrencyCallback(_In_ const std::shared_ptr<IViewModelCurrencyCallback>& newCallback) = 0;
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
         virtual concurrency::task<std::pair<bool, std::wstring>> RefreshCurrencyRatios() = 0;
+#endif
         virtual void Calculate() = 0;
         virtual void ResetCategoriesAndRatios() = 0;
     };
@@ -251,7 +267,9 @@ namespace UnitConversionManager
         void SendCommand(Command command) override;
         void SetViewModelCallback(_In_ const std::shared_ptr<IUnitConverterVMCallback>& newCallback) override;
         void SetViewModelCurrencyCallback(_In_ const std::shared_ptr<IViewModelCurrencyCallback>& newCallback) override;
+#if defined(CALC_SUPPORTS_CURRENCY_ASYNC)
         concurrency::task<std::pair<bool, std::wstring>> RefreshCurrencyRatios() override;
+#endif
         void Calculate() override;
         void ResetCategoriesAndRatios() override;
         // IUnitConverter

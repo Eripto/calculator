@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <sstream>
 #include "Header Files/CalcEngine.h"
 
 using namespace std;

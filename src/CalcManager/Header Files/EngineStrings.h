@@ -206,7 +206,10 @@ inline constexpr auto SIDS_CUBEROOT = L"CubeRoot";
 inline constexpr auto SIDS_PROGRAMMER_MOD = L"ProgrammerMod";
 
 // Include the resource key ID from above into this vector to load it into memory for the engine to use
-inline constexpr std::array<std::wstring_view, 152> g_sids = {
+// Plain pointers rather than string views: the array is only ever walked once
+// at start-up and each element converts implicitly where a view is wanted, so
+// this halves its size and its relocations.
+inline constexpr std::array<const wchar_t*, 152> g_sids = {
     SIDS_PLUS_MINUS,
     SIDS_C,
     SIDS_CE,

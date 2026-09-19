@@ -487,8 +487,13 @@ extern bool rat_lt(_In_ PRAT a, _In_ PRAT b, int32_t precision);
 extern bool rat_le(_In_ PRAT a, _In_ PRAT b, int32_t precision);
 extern void inbetween(_In_ PRAT* px, _In_ PRAT range, int32_t precision);
 extern void trimit(_Inout_ PRAT* px, int32_t precision);
+#if defined(GEN_CONST)
+// Constant-generation helpers; defined in support.cpp under the same guard.
+// Keeping these out of ordinary builds keeps <iostream> -- and with it the
+// whole locale/iostream machinery -- off the link line.
 extern void _dumprawrat(_In_ const wchar_t* varname, _In_ PRAT rat, std::wostream& out);
 extern void _dumprawnum(_In_ const wchar_t* varname, _In_ PNUMBER num, std::wostream& out);
+#endif
 
 // if |pr| is magnitude smaller than |a| or |b| beyond precision, snap pr to 0
 extern void _snaprat(_Inout_ PRAT* pr, _In_ PRAT a, _In_opt_ PRAT b, int32_t precision);
