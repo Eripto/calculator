@@ -545,6 +545,12 @@ namespace
         ACT_GRAPH_BACKSPACE,
         ACT_GRAPH_CLEAR,
         ACT_GRAPH_NEGATE,
+        ACT_GRAPH_TAB_PLOT,
+        ACT_GRAPH_TAB_EQUATIONS,
+        ACT_GRAPH_TRACE,
+        ACT_GRAPH_SHARE,
+        ACT_GRAPH_OPTIONS,
+        ACT_INEQ_MENU,
         ACT_ALWAYS_ON_TOP,
         ACT_APP_THEME,
         ACT_SETTINGS,
@@ -619,6 +625,32 @@ namespace
         VIcon_ZoomOut,
         VIcon_ZoomReset,
         VIcon_Plus,
+        VIcon_Minus,
+        // Navigation category icons. The icon fonts do not carry every one of
+        // these codepoints on every machine -- several showed as empty boxes --
+        // so they are paths like the rest of the chrome.
+        VIcon_Flask,
+        VIcon_Curve,
+        VIcon_Code,
+        VIcon_Cup,
+        VIcon_Ruler,
+        VIcon_Scales,
+        VIcon_Thermometer,
+        VIcon_Flame,
+        VIcon_AreaGrid,
+        VIcon_Speed,
+        VIcon_Clock,
+        VIcon_Plug,
+        VIcon_Data,
+        VIcon_Gauge,
+        VIcon_Angle,
+        // Graphing chrome.
+        VIcon_Share,
+        VIcon_Trace,
+        VIcon_GraphSettings,
+        VIcon_Recenter,
+        VIcon_Fx,
+        VIcon_Enter,
         VIcon_Close,
     };
 
@@ -1374,6 +1406,10 @@ namespace
         double m_graphYMax = 10.0;
         RECT m_graphRect{};
         RECT m_graphEquationRect{};
+        // The shipping app shows either the plot or the equation editor, with a
+        // two-tab toggle in the title bar between them, rather than stacking
+        // both. It opens on the plot.
+        bool m_graphEquationsView = false;
         bool m_graphDragging = false;
         POINT m_graphDragFrom{};
         double m_graphDragXMin = 0.0;
@@ -1582,6 +1618,28 @@ namespace
             m_titleRect = { titleLeft, 0, titleLeft + titleWidth, navH };
 
             int right = contentRight - Dp(6);
+
+            if (m_mode == Mode::Graphing)
+            {
+                // A segmented pair of tabs, the plot on the left and the
+                // equation editor on the right, as the shipping title bar has.
+                const int tabWidth = Dp(38);
+                const int tabHeight = Dp(30);
+                const int tabTop = centre - tabHeight / 2;
+                for (int i = 0; i < 2; ++i)
+                {
+                    Btn tab;
+                    tab.action = (i == 0) ? ACT_GRAPH_TAB_PLOT : ACT_GRAPH_TAB_EQUATIONS;
+                    tab.style = Style::Toggle;
+                    tab.vicon = (i == 0) ? VIcon_Curve : VIcon_Fx;
+                    tab.textDip = 15;
+                    tab.checked = (i == 0) ? !m_graphEquationsView : m_graphEquationsView;
+                    const int tabLeft = right - tabWidth * (2 - i);
+                    tab.rc = { tabLeft, tabTop, tabLeft + tabWidth, tabTop + tabHeight };
+                    m_buttons.push_back(tab);
+                }
+                right -= tabWidth * 2 + Dp(6);
+            }
 
             const bool calculatorMode = (m_mode == Mode::Standard || m_mode == Mode::Scientific || m_mode == Mode::Programmer);
             if (calculatorMode)
@@ -2015,6 +2073,24 @@ namespace
         case 0xE74D: return VIcon_Close;
         case 0xE787: return VIcon_Calendar;
         case 0xE713: return VIcon_Gear;
+        // The navigation categories, keyed by the codepoints NavCategory.cs
+        // assigns them.
+        case 0xE8EF: return VIcon_Calculator;    // Standard
+        case 0xF196: return VIcon_Flask;         // Scientific
+        case 0xF770: return VIcon_Curve;         // Graphing
+        case 0xECCE: return VIcon_Code;          // Programmer
+        case 0xF1AA: return VIcon_Cup;           // Volume
+        case 0xECC6: return VIcon_Ruler;         // Length
+        case 0xF4C1: return VIcon_Scales;        // Weight and mass
+        case 0xE7A3: return VIcon_Thermometer;   // Temperature
+        case 0xECAD: return VIcon_Flame;         // Energy
+        case 0xE809: return VIcon_AreaGrid;      // Area
+        case 0xEADA: return VIcon_Speed;         // Speed
+        case 0xE917: return VIcon_Clock;         // Time
+        case 0xE945: return VIcon_Plug;          // Power
+        case 0xF20F: return VIcon_Data;          // Data
+        case 0xEC4A: return VIcon_Gauge;         // Pressure
+        case 0xF515: return VIcon_Angle;         // Angle
         default: return VIcon_None;
         }
     }
@@ -2511,6 +2587,199 @@ namespace
             g.DrawLine(&pen, P(3.5f, 8.0f), P(12.5f, 8.0f));
             break;
 
+        case VIcon_Minus:
+            g.DrawLine(&pen, P(3.5f, 8.0f), P(12.5f, 8.0f));
+            break;
+
+        case VIcon_Flask:
+            // Scientific: a conical flask.
+            g.DrawLine(&pen, P(6.4f, 2.2f), P(6.4f, 6.6f));
+            g.DrawLine(&pen, P(9.6f, 2.2f), P(9.6f, 6.6f));
+            g.DrawLine(&pen, P(5.4f, 2.2f), P(10.6f, 2.2f));
+            g.DrawLine(&pen, P(6.4f, 6.6f), P(3.2f, 12.4f));
+            g.DrawLine(&pen, P(9.6f, 6.6f), P(12.8f, 12.4f));
+            g.DrawLine(&pen, P(3.2f, 12.4f), P(12.8f, 12.4f));
+            g.DrawLine(&pen, P(5.0f, 9.2f), P(11.0f, 9.2f));
+            break;
+
+        case VIcon_Curve:
+        {
+            // Graphing: axes with a curve rising across them.
+            g.DrawLine(&pen, P(2.6f, 2.6f), P(2.6f, 13.4f));
+            g.DrawLine(&pen, P(2.6f, 13.4f), P(13.4f, 13.4f));
+            const Gdiplus::PointF curve[4] = { P(3.4f, 11.6f), P(6.4f, 10.4f), P(8.4f, 4.6f), P(12.8f, 3.4f) };
+            g.DrawCurve(&pen, curve, 4);
+            break;
+        }
+
+        case VIcon_Code:
+            // Programmer: angle brackets around a slash.
+            g.DrawLine(&pen, P(5.6f, 4.4f), P(2.4f, 8.0f));
+            g.DrawLine(&pen, P(2.4f, 8.0f), P(5.6f, 11.6f));
+            g.DrawLine(&pen, P(10.4f, 4.4f), P(13.6f, 8.0f));
+            g.DrawLine(&pen, P(13.6f, 8.0f), P(10.4f, 11.6f));
+            g.DrawLine(&pen, P(9.2f, 3.4f), P(6.8f, 12.6f));
+            break;
+
+        case VIcon_Cup:
+            // Volume: a measuring cup with a level line.
+            g.DrawLine(&pen, P(3.4f, 3.4f), P(4.6f, 13.0f));
+            g.DrawLine(&pen, P(12.6f, 3.4f), P(11.4f, 13.0f));
+            g.DrawLine(&pen, P(4.6f, 13.0f), P(11.4f, 13.0f));
+            g.DrawLine(&pen, P(3.4f, 3.4f), P(12.6f, 3.4f));
+            g.DrawLine(&pen, P(4.1f, 8.6f), P(11.9f, 8.6f));
+            break;
+
+        case VIcon_Ruler:
+            // Length: a rule with graduations.
+            g.DrawRectangle(&pen, Gdiplus::RectF(ox + 1.8f * s, oy + 5.4f * s, 12.4f * s, 5.2f * s));
+            g.DrawLine(&pen, P(4.4f, 5.4f), P(4.4f, 8.0f));
+            g.DrawLine(&pen, P(6.8f, 5.4f), P(6.8f, 9.0f));
+            g.DrawLine(&pen, P(9.2f, 5.4f), P(9.2f, 8.0f));
+            g.DrawLine(&pen, P(11.6f, 5.4f), P(11.6f, 9.0f));
+            break;
+
+        case VIcon_Scales:
+            // Weight and mass: a balance.
+            g.DrawLine(&pen, P(8.0f, 3.0f), P(8.0f, 13.0f));
+            g.DrawLine(&pen, P(3.0f, 5.0f), P(13.0f, 5.0f));
+            g.DrawLine(&pen, P(5.0f, 13.0f), P(11.0f, 13.0f));
+            g.DrawLine(&pen, P(3.0f, 5.0f), P(1.8f, 8.6f));
+            g.DrawLine(&pen, P(1.8f, 8.6f), P(4.2f, 8.6f));
+            g.DrawLine(&pen, P(4.2f, 8.6f), P(3.0f, 5.0f));
+            g.DrawLine(&pen, P(13.0f, 5.0f), P(11.8f, 8.6f));
+            g.DrawLine(&pen, P(11.8f, 8.6f), P(14.2f, 8.6f));
+            g.DrawLine(&pen, P(14.2f, 8.6f), P(13.0f, 5.0f));
+            break;
+
+        case VIcon_Thermometer:
+            // Temperature: a bulb thermometer.
+            g.DrawLine(&pen, P(6.6f, 3.0f), P(6.6f, 9.4f));
+            g.DrawLine(&pen, P(9.4f, 3.0f), P(9.4f, 9.4f));
+            g.DrawArc(&pen, ox + 6.6f * s, oy + 2.0f * s, 2.8f * s, 2.8f * s, 180.0f, 180.0f);
+            g.DrawEllipse(&pen, ox + 5.4f * s, oy + 9.0f * s, 5.2f * s, 5.2f * s);
+            g.FillEllipse(&brush, ox + 6.6f * s, oy + 10.2f * s, 2.8f * s, 2.8f * s);
+            break;
+
+        case VIcon_Flame:
+        {
+            // Energy: a flame.
+            Gdiplus::GraphicsPath flame;
+            const Gdiplus::PointF body[6] = { P(8.0f, 1.8f),  P(11.8f, 5.6f), P(12.6f, 9.6f),
+                                              P(8.0f, 14.2f), P(3.4f, 9.6f),  P(5.6f, 6.0f) };
+            flame.AddClosedCurve(body, 6);
+            g.DrawPath(&pen, &flame);
+            break;
+        }
+
+        case VIcon_AreaGrid:
+            // Area: a square divided into cells.
+            g.DrawRectangle(&pen, Gdiplus::RectF(ox + 2.4f * s, oy + 2.4f * s, 11.2f * s, 11.2f * s));
+            g.DrawLine(&pen, P(8.0f, 2.4f), P(8.0f, 13.6f));
+            g.DrawLine(&pen, P(2.4f, 8.0f), P(13.6f, 8.0f));
+            break;
+
+        case VIcon_Speed:
+            // Speed: a dial with a needle.
+            g.DrawArc(&pen, ox + 1.8f * s, oy + 3.0f * s, 12.4f * s, 12.4f * s, 180.0f, 180.0f);
+            g.DrawLine(&pen, P(8.0f, 9.2f), P(11.0f, 5.6f));
+            g.FillEllipse(&brush, ox + 7.2f * s, oy + 8.4f * s, 1.6f * s, 1.6f * s);
+            g.DrawLine(&pen, P(1.8f, 9.2f), P(3.2f, 9.2f));
+            g.DrawLine(&pen, P(12.8f, 9.2f), P(14.2f, 9.2f));
+            break;
+
+        case VIcon_Clock:
+            // Time: a clock face.
+            g.DrawEllipse(&pen, ox + 2.2f * s, oy + 2.2f * s, 11.6f * s, 11.6f * s);
+            g.DrawLine(&pen, P(8.0f, 4.8f), P(8.0f, 8.0f));
+            g.DrawLine(&pen, P(8.0f, 8.0f), P(10.6f, 9.4f));
+            break;
+
+        case VIcon_Plug:
+            // Power: the standard power symbol.
+            g.DrawArc(&pen, ox + 3.0f * s, oy + 3.6f * s, 10.0f * s, 10.0f * s, 300.0f, 300.0f);
+            g.DrawLine(&pen, P(8.0f, 1.8f), P(8.0f, 7.4f));
+            break;
+
+        case VIcon_Data:
+            // Data: stacked platters.
+            g.DrawEllipse(&pen, ox + 2.6f * s, oy + 2.4f * s, 10.8f * s, 3.4f * s);
+            g.DrawLine(&pen, P(2.6f, 4.1f), P(2.6f, 11.9f));
+            g.DrawLine(&pen, P(13.4f, 4.1f), P(13.4f, 11.9f));
+            g.DrawArc(&pen, ox + 2.6f * s, oy + 6.4f * s, 10.8f * s, 3.4f * s, 0.0f, 180.0f);
+            g.DrawArc(&pen, ox + 2.6f * s, oy + 10.2f * s, 10.8f * s, 3.4f * s, 0.0f, 180.0f);
+            break;
+
+        case VIcon_Gauge:
+            // Pressure: a gauge with a needle and a stem.
+            g.DrawEllipse(&pen, ox + 2.6f * s, oy + 1.8f * s, 10.8f * s, 10.8f * s);
+            g.DrawLine(&pen, P(8.0f, 7.2f), P(10.4f, 4.8f));
+            g.DrawLine(&pen, P(6.6f, 12.4f), P(9.4f, 12.4f));
+            g.DrawLine(&pen, P(7.0f, 12.4f), P(7.0f, 14.2f));
+            g.DrawLine(&pen, P(9.0f, 12.4f), P(9.0f, 14.2f));
+            break;
+
+        case VIcon_Angle:
+            // Angle: two rays with an arc between them.
+            g.DrawLine(&pen, P(2.6f, 12.4f), P(13.4f, 12.4f));
+            g.DrawLine(&pen, P(2.6f, 12.4f), P(12.0f, 4.2f));
+            g.DrawArc(&pen, ox + 2.6f * s, oy + 7.6f * s, 9.6f * s, 9.6f * s, 270.0f, 49.0f);
+            break;
+
+        case VIcon_Share:
+            // Three nodes joined by two links.
+            g.DrawEllipse(&pen, ox + 10.2f * s, oy + 1.8f * s, 3.6f * s, 3.6f * s);
+            g.DrawEllipse(&pen, ox + 2.2f * s, oy + 6.2f * s, 3.6f * s, 3.6f * s);
+            g.DrawEllipse(&pen, ox + 10.2f * s, oy + 10.6f * s, 3.6f * s, 3.6f * s);
+            g.DrawLine(&pen, P(5.6f, 7.0f), P(10.4f, 4.2f));
+            g.DrawLine(&pen, P(5.6f, 9.0f), P(10.4f, 11.8f));
+            break;
+
+        case VIcon_Trace:
+        {
+            // Trace: a play triangle.
+            const Gdiplus::PointF play[3] = { P(5.0f, 3.2f), P(12.4f, 8.0f), P(5.0f, 12.8f) };
+            g.DrawPolygon(&pen, play, 3);
+            break;
+        }
+
+        case VIcon_GraphSettings:
+            // A plot with a gear in its corner.
+            g.DrawLine(&pen, P(2.4f, 2.4f), P(2.4f, 12.0f));
+            g.DrawLine(&pen, P(2.4f, 12.0f), P(12.0f, 12.0f));
+            g.DrawLine(&pen, P(3.4f, 9.6f), P(7.0f, 5.2f));
+            g.DrawEllipse(&pen, ox + 9.4f * s, oy + 2.2f * s, 4.4f * s, 4.4f * s);
+            g.DrawLine(&pen, P(11.6f, 1.2f), P(11.6f, 7.6f));
+            g.DrawLine(&pen, P(8.4f, 4.4f), P(14.8f, 4.4f));
+            break;
+
+        case VIcon_Recenter:
+            // Recentre: a crosshair over the origin.
+            g.DrawEllipse(&pen, ox + 4.6f * s, oy + 4.6f * s, 6.8f * s, 6.8f * s);
+            g.DrawLine(&pen, P(8.0f, 1.6f), P(8.0f, 4.0f));
+            g.DrawLine(&pen, P(8.0f, 12.0f), P(8.0f, 14.4f));
+            g.DrawLine(&pen, P(1.6f, 8.0f), P(4.0f, 8.0f));
+            g.DrawLine(&pen, P(12.0f, 8.0f), P(14.4f, 8.0f));
+            g.FillEllipse(&brush, ox + 7.0f * s, oy + 7.0f * s, 2.0f * s, 2.0f * s);
+            break;
+
+        case VIcon_Enter:
+            // The return arrow on the graphing keypad's accent key.
+            g.DrawLine(&pen, P(12.2f, 3.6f), P(12.2f, 9.6f));
+            g.DrawLine(&pen, P(12.2f, 9.6f), P(4.6f, 9.6f));
+            g.DrawLine(&pen, P(7.6f, 6.6f), P(4.2f, 9.6f));
+            g.DrawLine(&pen, P(4.2f, 9.6f), P(7.6f, 12.6f));
+            break;
+
+        case VIcon_Fx:
+            // The equations tab: a lowercase f beside an x.
+            g.DrawArc(&pen, ox + 4.4f * s, oy + 2.4f * s, 4.0f * s, 4.0f * s, 180.0f, 140.0f);
+            g.DrawLine(&pen, P(5.6f, 4.4f), P(5.6f, 13.2f));
+            g.DrawLine(&pen, P(3.4f, 7.2f), P(8.0f, 7.2f));
+            g.DrawLine(&pen, P(9.6f, 8.4f), P(13.6f, 13.2f));
+            g.DrawLine(&pen, P(13.6f, 8.4f), P(9.6f, 13.2f));
+            break;
+
         case VIcon_RadioOff:
             g.DrawEllipse(&pen, ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s);
             break;
@@ -2903,18 +3172,31 @@ namespace
             }
         }
 
-        // Axes, drawn heavier than the grid.
+        // Axes: heavier than the grid, and tipped with arrowheads the way the
+        // shipping plot draws them.
         {
-            Gdiplus::Pen axis(ToGp(g_theme.secondaryText), 1.4f);
+            Gdiplus::Pen axis(ToGp(g_theme.primaryText), 1.2f);
+            Gdiplus::SolidBrush head(ToGp(g_theme.primaryText));
+            const float arrow = static_cast<float>(Dp(5));
             if (xMin <= 0.0 && xMax >= 0.0)
             {
                 const auto sx = static_cast<Gdiplus::REAL>(toScreenX(0.0));
-                g.DrawLine(&axis, sx, static_cast<Gdiplus::REAL>(plot.top), sx, static_cast<Gdiplus::REAL>(plot.bottom));
+                g.DrawLine(&axis, sx, static_cast<Gdiplus::REAL>(plot.top + Dp(6)), sx,
+                           static_cast<Gdiplus::REAL>(plot.bottom));
+                const Gdiplus::PointF tip[3] = { { sx, static_cast<Gdiplus::REAL>(plot.top) },
+                                                 { sx - arrow * 0.6f, static_cast<Gdiplus::REAL>(plot.top) + arrow },
+                                                 { sx + arrow * 0.6f, static_cast<Gdiplus::REAL>(plot.top) + arrow } };
+                g.FillPolygon(&head, tip, 3);
             }
             if (yMin <= 0.0 && yMax >= 0.0)
             {
                 const auto sy = static_cast<Gdiplus::REAL>(toScreenY(0.0));
-                g.DrawLine(&axis, static_cast<Gdiplus::REAL>(plot.left), sy, static_cast<Gdiplus::REAL>(plot.right), sy);
+                g.DrawLine(&axis, static_cast<Gdiplus::REAL>(plot.left), sy,
+                           static_cast<Gdiplus::REAL>(plot.right - Dp(6)), sy);
+                const Gdiplus::PointF tip[3] = { { static_cast<Gdiplus::REAL>(plot.right), sy },
+                                                 { static_cast<Gdiplus::REAL>(plot.right) - arrow, sy - arrow * 0.6f },
+                                                 { static_cast<Gdiplus::REAL>(plot.right) - arrow, sy + arrow * 0.6f } };
+                g.FillPolygon(&head, tip, 3);
             }
         }
 
@@ -2978,96 +3260,140 @@ namespace
 
         g.ResetClip();
 
-        // Tick labels, along the axes where they are on screen and along the
-        // edges where they are not.
+        // The plot's controls sit on rounded cards, as they do in the shipping
+        // graph view. Drawn here so the buttons themselves land on top.
         {
-            const double axisY = (yMin <= 0.0 && yMax >= 0.0) ? 0.0 : ((yMin > 0.0) ? yMin : yMax);
-            const double axisX = (xMin <= 0.0 && xMax >= 0.0) ? 0.0 : ((xMin > 0.0) ? xMin : xMax);
-            const int baseY = static_cast<int>(toScreenY(axisY));
-            const int baseX = static_cast<int>(toScreenX(axisX));
-
-            for (double x = std::ceil(xMin / xStep) * xStep; x <= xMax; x += xStep)
-            {
-                if (std::fabs(x) < xStep * 0.5 && std::fabs(axisX) < xStep * 0.5)
+            const auto cardFor = [&](std::initializer_list<int> actions) {
+                RECT box{ 0, 0, 0, 0 };
+                bool first = true;
+                for (const Btn& b : app.m_buttons)
                 {
-                    continue; // the origin is labelled once, on the y axis
+                    bool wanted = false;
+                    for (const int action : actions)
+                    {
+                        if (b.action == action)
+                        {
+                            wanted = true;
+                            break;
+                        }
+                    }
+                    if (!wanted)
+                    {
+                        continue;
+                    }
+                    if (first)
+                    {
+                        box = b.rc;
+                        first = false;
+                    }
+                    else
+                    {
+                        box.left = (std::min)(box.left, b.rc.left);
+                        box.top = (std::min)(box.top, b.rc.top);
+                        box.right = (std::max)(box.right, b.rc.right);
+                        box.bottom = (std::max)(box.bottom, b.rc.bottom);
+                    }
                 }
-                const int sx = static_cast<int>(toScreenX(x));
-                if (sx < plot.left + Dp(14) || sx > plot.right - Dp(14))
+                if (!first)
                 {
-                    continue; // would be clipped by the edge of the plot
+                    box.left -= Dp(3);
+                    box.top -= Dp(3);
+                    box.right += Dp(3);
+                    box.bottom += Dp(3);
+                    FillRounded(g, box, Dp(6), g_theme.dark ? Mix(g_theme.card, RGB(255, 255, 255), 0.06) : g_theme.page);
                 }
-                RECT label{ sx - Dp(22), (std::min)(baseY + Dp(2), static_cast<int>(plot.bottom) - Dp(16)),
-                            sx + Dp(22), (std::min)(baseY + Dp(16), static_cast<int>(plot.bottom)) };
-                DrawLabel(hdc, label, TickLabel(x, xStep), 10, g_theme.secondaryText, false,
-                          DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOCLIP);
-            }
-            for (double y = std::ceil(yMin / yStep) * yStep; y <= yMax; y += yStep)
-            {
-                const int sy = static_cast<int>(toScreenY(y));
-                if (sy < plot.top + Dp(8) || sy > plot.bottom - Dp(8))
-                {
-                    continue;
-                }
-                RECT label{ (std::max)(baseX - Dp(46), static_cast<int>(plot.left)), sy - Dp(8),
-                            (std::max)(baseX - Dp(4), static_cast<int>(plot.left) + Dp(42)), sy + Dp(8) };
-                DrawLabel(hdc, label, TickLabel(y, yStep), 10, g_theme.secondaryText, false,
-                          DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOCLIP);
-            }
+            };
+            cardFor({ ACT_GRAPH_TRACE, ACT_GRAPH_SHARE, ACT_GRAPH_OPTIONS });
+            cardFor({ ACT_GRAPH_ZOOM_IN, ACT_GRAPH_ZOOM_OUT, ACT_GRAPH_RESET });
         }
 
+        // The shipping plot labels the axes themselves rather than the ticks:
+        // an italic x and y at the arrow ends, and a single 0 at the origin.
+        {
+            const bool haveY = (xMin <= 0.0 && xMax >= 0.0);
+            const bool haveX = (yMin <= 0.0 && yMax >= 0.0);
+            if (haveY)
+            {
+                const int sx = static_cast<int>(toScreenX(0.0));
+                RECT label{ sx + Dp(6), plot.top + Dp(2), sx + Dp(28), plot.top + Dp(20) };
+                DrawLabel(hdc, label, L"y", 13, g_theme.primaryText, false,
+                          DT_SINGLELINE | DT_LEFT | DT_VCENTER, FW_NORMAL, 0, true);
+            }
+            if (haveX)
+            {
+                const int sy = static_cast<int>(toScreenY(0.0));
+                RECT label{ plot.right - Dp(22), sy + Dp(4), plot.right - Dp(4), sy + Dp(22) };
+                DrawLabel(hdc, label, L"x", 13, g_theme.primaryText, false,
+                          DT_SINGLELINE | DT_RIGHT | DT_VCENTER, FW_NORMAL, 0, true);
+            }
+            if (haveX && haveY)
+            {
+                const int sx = static_cast<int>(toScreenX(0.0));
+                const int sy = static_cast<int>(toScreenY(0.0));
+                RECT label{ sx - Dp(22), sy + Dp(2), sx - Dp(4), sy + Dp(20) };
+                DrawLabel(hdc, label, L"0", 12, g_theme.secondaryText, false,
+                          DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
+            }
+        }
     }
 
-    // The equation list, drawn after the rows' own hover fills.
+    void EnsureGraphingSafe(CalcApp& app)
+    {
+        if (app.m_equations.empty())
+        {
+            app.EnsureGraphing();
+        }
+        if (app.m_activeEquation < 0 || app.m_activeEquation >= static_cast<int>(app.m_equations.size()))
+        {
+            app.m_activeEquation = 0;
+        }
+    }
+
+    // The equation editor: the f badge the shipping app puts beside the field,
+    // and the expression being typed.
     void PaintGraphing(HDC hdc, CalcApp& app)
     {
-        // Equation rows: a colour swatch, the equation, and the caret on the
-        // row being edited.
-        for (size_t i = 0; i < app.m_equations.size(); ++i)
+        if (!app.m_graphEquationsView)
         {
-            const auto& equation = app.m_equations[i];
-            const int action = ACT_GRAPH_SELECT_BASE + static_cast<int>(i);
-            const Btn* row = nullptr;
-            for (const Btn& candidate : app.m_buttons)
-            {
-                if (candidate.action == action)
-                {
-                    row = &candidate;
-                    break;
-                }
-            }
-            if (row == nullptr)
-            {
-                continue;
-            }
-
-            const COLORREF colour = EquationColour(equation.colour);
-            const int centre = (row->rc.top + row->rc.bottom) / 2;
-            RECT swatch{ row->rc.left + Dp(6), centre - Dp(9), row->rc.left + Dp(10), centre + Dp(9) };
-            HBRUSH brush = CreateSolidBrush(colour);
-            FillRect(hdc, &swatch, brush);
-            DeleteObject(brush);
-
-            RECT text{ row->rc.left + Dp(20), row->rc.top, row->rc.right - Dp(6), row->rc.bottom };
-            const bool active = (static_cast<int>(i) == app.m_activeEquation);
-            if (equation.text.empty())
-            {
-                DrawLabel(hdc, text, L"Enter an equation", 14, g_theme.disabledText, false,
-                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
-            }
-            else
-            {
-                std::wstring shown = L"y = ";
-                shown += equation.text;
-                if (active)
-                {
-                    shown += L"|"; // the caret, on the row being typed into
-                }
-                DrawLabel(hdc, text, shown, 14,
-                          equation.valid ? g_theme.primaryText : g_theme.disabledText, false,
-                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
-            }
+            return;
         }
+        const RECT& field = app.m_graphEquationRect;
+        if (field.right <= field.left)
+        {
+            return;
+        }
+
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        const int badge = field.bottom - field.top - Dp(12);
+        RECT badgeRect{ field.left + Dp(6), field.top + Dp(6), field.left + Dp(6) + badge, field.top + Dp(6) + badge };
+        FillRounded(g, badgeRect, Dp(4), g_theme.flatHover);
+        DrawLabel(
+            hdc, badgeRect, L"f", 18, g_theme.primaryText, false, DT_SINGLELINE | DT_CENTER | DT_VCENTER, FW_NORMAL, 0,
+            true);
+
+        EnsureGraphingSafe(app);
+        const auto& equation = app.m_equations[app.m_activeEquation];
+        RECT text{ badgeRect.right + Dp(12), field.top, field.right - Dp(10), field.bottom };
+        if (equation.text.empty())
+        {
+            DrawLabel(hdc, text, L"Enter an expression", 14, g_theme.disabledText, false,
+                      DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+        else
+        {
+            std::wstring shown = equation.text;
+            shown += L"|"; // the caret
+            DrawLabel(hdc, text, shown, 14, equation.valid ? g_theme.primaryText : g_theme.disabledText, false,
+                      DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+
+        // The colour of the equation being edited, on the leading edge.
+        RECT swatch{ field.left, field.top + Dp(10), field.left + Dp(3), field.bottom - Dp(10) };
+        HBRUSH brush = CreateSolidBrush(EquationColour(equation.colour));
+        FillRect(hdc, &swatch, brush);
+        DeleteObject(brush);
     }
 
     void PaintDate(HDC hdc, CalcApp& app)
@@ -4383,17 +4709,43 @@ namespace
         {
             // The keypad's characters, indexed the way BuildGraphingLayout
             // numbers them.
+            // Single characters keep their slot; the keys that insert a whole
+            // function name are listed after them.
             static constexpr wchar_t kCharacters[] = {
-                L'x',  L'(', L')', L'^',                 // row 1, backspace aside
-                L'7',  L'8', L'9', 0x00F7, 0x03C0,       // row 2
-                L'4',  L'5', L'6', 0x00D7, L'e',         // row 3
-                L'1',  L'2', L'3', 0x2212, L'|',         // row 4
-                L'0',  L'.', L'+',                       // row 5, +/- and C aside
+                L'x',  L'(', L')', L'^',
+                L'7',  L'8', L'9', 0x00F7, 0x03C0,
+                L'4',  L'5', L'6', 0x00D7, L'e',
+                L'1',  L'2', L'3', 0x2212, L'|',
+                L'0',  L'.', L'+', 0x03C0,
             };
+            static constexpr const wchar_t* kSequences[] = {
+                L"^2",      // 23: x squared
+                L"^(-1)",   // 24: one over x
+                L"abs(",    // 25
+                L"y",       // 26
+                L"sqrt(",   // 27
+                L"=",       // 28
+                L"10^",     // 29
+                L"log(",    // 30
+                L"ln(",     // 31
+                L"<",       // 32, from the inequalities flyout
+                L">",       // 33
+                L"\u2264",  // 34
+                L"\u2265",  // 35
+            };
+            constexpr int kCharacterCount = static_cast<int>(sizeof(kCharacters) / sizeof(kCharacters[0]));
             const int index = action - ACT_GRAPH_TEXT_BASE;
-            if (index >= 0 && index < static_cast<int>(sizeof(kCharacters) / sizeof(kCharacters[0])))
+            if (index >= 0 && index < kCharacterCount)
             {
                 app.AppendToEquation(kCharacters[index]);
+            }
+            else if (index >= kCharacterCount
+                     && index < kCharacterCount + static_cast<int>(sizeof(kSequences) / sizeof(kSequences[0])))
+            {
+                for (const wchar_t* c = kSequences[index - kCharacterCount]; *c != L'\0'; ++c)
+                {
+                    app.AppendToEquation(*c);
+                }
             }
             app.Relayout();
             return;
@@ -4642,6 +4994,19 @@ namespace
             app.ResetGraph();
             app.Relayout();
             break;
+        case ACT_GRAPH_TAB_PLOT:
+        case ACT_GRAPH_TAB_EQUATIONS:
+            app.m_graphEquationsView = (action == ACT_GRAPH_TAB_EQUATIONS);
+            app.StartContentEnter();
+            app.Relayout();
+            break;
+        case ACT_GRAPH_TRACE:
+        case ACT_GRAPH_SHARE:
+        case ACT_GRAPH_OPTIONS:
+            // Present for layout fidelity; tracing and the options pane need
+            // the analysis the solver would provide, and sharing a plot has
+            // nowhere to go from here.
+            break;
         case ACT_GRAPH_ADD:
         {
             CalcApp::GraphEquation added;
@@ -4801,6 +5166,30 @@ namespace
             app.Send(app.m_angle);
             app.Relayout();
             break;
+        case ACT_INEQ_MENU:
+        {
+            static constexpr MenuItem kInequalityMenu[] = {
+                { L"<", ACT_GRAPH_TEXT_BASE + 32 },  { L">", ACT_GRAPH_TEXT_BASE + 33 },
+                { L"\u2264", ACT_GRAPH_TEXT_BASE + 34 }, { L"\u2265", ACT_GRAPH_TEXT_BASE + 35 },
+            };
+            app.m_menuItemStorage.clear();
+            app.m_menuItemStorage.reserve(4);
+            for (const MenuItem& item : kInequalityMenu)
+            {
+                app.m_menuItemStorage.push_back(item);
+            }
+            RECT anchor{ 0, 0, 0, 0 };
+            for (const auto& b : app.m_buttons)
+            {
+                if (b.action == ACT_INEQ_MENU)
+                {
+                    anchor = b.rc;
+                    break;
+                }
+            }
+            OpenMenu(app.m_menuItemStorage.data(), app.m_menuItemStorage.size(), anchor);
+            break;
+        }
         case ACT_TRIG_MENU:
         {
             // One flyout lists the circular functions and then the hyperbolic
@@ -5717,134 +6106,133 @@ namespace
 
     // Graphing: the plot on top, the equation list under it, and a keypad
     // carrying the graphing numpad's function set.
+    // Graphing, laid out as GraphingCalculator.xaml has it: the title bar
+    // carries a two-tab toggle, and the body shows either the plot or the
+    // equation editor with its keypad -- not both stacked.
     void CalcApp::BuildGraphingLayout(int contentRight, int height, int y)
     {
         EnsureGraphing();
         const int pad = Dp(kPadDip);
         const int gap = Dp(kGapDip);
-
         const int left = pad;
         const int right = contentRight - pad;
 
-        // --- the plot, with its zoom controls in the trailing corner --------
-        const int plotHeight = (std::max)(Dp(140), (height - y) * 42 / 100);
-        m_graphRect = { left, y, right, y + plotHeight };
-
-        const auto zoomButton = [&](int action, int vicon, int index) {
-            Btn button;
-            button.action = action;
-            button.style = Style::Flat;
-            button.vicon = vicon;
-            button.textDip = 14;
-            const int size = Dp(30);
-            button.rc = { m_graphRect.right - Dp(6) - size, m_graphRect.top + Dp(6) + index * (size + Dp(4)),
-                          m_graphRect.right - Dp(6), m_graphRect.top + Dp(6) + index * (size + Dp(4)) + size };
-            m_buttons.push_back(button);
-        };
-        zoomButton(ACT_GRAPH_ZOOM_IN, VIcon_ZoomIn, 0);
-        zoomButton(ACT_GRAPH_ZOOM_OUT, VIcon_ZoomOut, 1);
-        zoomButton(ACT_GRAPH_RESET, VIcon_ZoomReset, 2);
-
-        y += plotHeight + Dp(6);
-
-        // --- equation rows --------------------------------------------------
-        const int rowHeight = Dp(34);
-        const int listTop = y;
-        int shown = 0;
-        for (size_t i = 0; i < m_equations.size(); ++i)
+        if (!m_graphEquationsView)
         {
-            if (y + rowHeight > height - Dp(190))
+            // ---- plot view -------------------------------------------------
+            m_graphRect = { left, y, right, height - pad };
+            m_graphEquationRect = RECT{ 0, 0, 0, 0 };
+
+            // Trace, share and graph options along the top trailing corner.
+            const int size = Dp(32);
+            int bx = m_graphRect.right - Dp(8) - size;
+            for (const auto& entry : { std::pair{ ACT_GRAPH_OPTIONS, VIcon_GraphSettings },
+                                       std::pair{ ACT_GRAPH_SHARE, VIcon_Share },
+                                       std::pair{ ACT_GRAPH_TRACE, VIcon_Trace } })
             {
-                break;
+                Btn button;
+                button.action = entry.first;
+                button.style = Style::Flat;
+                button.vicon = entry.second;
+                button.textDip = 15;
+                button.rc = { bx, m_graphRect.top + Dp(8), bx + size, m_graphRect.top + Dp(8) + size };
+                m_buttons.push_back(button);
+                bx -= size + Dp(4);
             }
-            Btn row;
-            row.action = ACT_GRAPH_SELECT_BASE + static_cast<int>(i);
-            row.style = Style::Bit; // hover fill only, like a list row
-            row.textDip = 14;
-            row.checked = (static_cast<int>(i) == m_activeEquation);
-            row.rc = { left, y, right - Dp(34), y + rowHeight - Dp(2) };
-            m_buttons.push_back(row);
 
-            Btn remove;
-            remove.action = ACT_GRAPH_REMOVE_BASE + static_cast<int>(i);
-            remove.style = Style::Flat;
-            remove.vicon = VIcon_Close;
-            remove.textDip = 12;
-            remove.rc = { right - Dp(32), y, right, y + rowHeight - Dp(2) };
-            m_buttons.push_back(remove);
-
-            y += rowHeight;
-            ++shown;
+            // Zoom and recentre stacked in the bottom trailing corner.
+            int by = m_graphRect.bottom - Dp(8) - size;
+            for (const auto& entry : { std::pair{ ACT_GRAPH_RESET, VIcon_Recenter },
+                                       std::pair{ ACT_GRAPH_ZOOM_OUT, VIcon_Minus },
+                                       std::pair{ ACT_GRAPH_ZOOM_IN, VIcon_Plus } })
+            {
+                Btn button;
+                button.action = entry.first;
+                button.style = Style::Flat;
+                button.vicon = entry.second;
+                button.textDip = 15;
+                button.rc = { m_graphRect.right - Dp(8) - size, by, m_graphRect.right - Dp(8), by + size };
+                m_buttons.push_back(button);
+                by -= size + Dp(4);
+            }
+            return;
         }
-        m_graphEquationRect = { left, listTop, right, y };
 
-        if (shown == static_cast<int>(m_equations.size()) && y + rowHeight <= height - Dp(190))
+        // ---- equations view ------------------------------------------------
+        m_graphRect = RECT{ 0, 0, 0, 0 };
+
+        // The expression field, with the f badge the shipping app puts beside it.
+        const int fieldHeight = Dp(56);
+        m_graphEquationRect = { left + Dp(8), y + Dp(6), right - Dp(8), y + Dp(6) + fieldHeight };
+
+        Btn field;
+        field.action = ACT_GRAPH_SELECT_BASE + m_activeEquation;
+        field.style = Style::Bit;
+        field.textDip = 14;
+        field.rc = m_graphEquationRect;
+        m_buttons.push_back(field);
+
+        y = m_graphEquationRect.bottom + Dp(10);
+
+        // Keypad: the three dropdowns, then the scientific grid with x, y, =
+        // and the enter key in place of exp, mod, n! and equals.
+        RECT keypad{ pad, height - Dp(300), contentRight - pad, height - pad };
+        if (keypad.top < y)
         {
-            Btn add;
-            add.label = L"Add equation";
-            add.action = ACT_GRAPH_ADD;
-            add.style = Style::Bit;
-            add.textDip = 13;
-            add.leftAlign = true;
-            add.vicon = VIcon_Plus;
-            add.rc = { left, y, right, y + rowHeight - Dp(2) };
-            m_buttons.push_back(add);
-            y += rowHeight;
+            keypad.top = y;
         }
 
-        // --- keypad ---------------------------------------------------------
-        y += Dp(4);
-        RECT keypad{ pad, y, contentRight - pad, height - pad };
-
-        // Trigonometry and Function dropdowns, as the scientific keypad has.
         const int controlHeight = Dp(30);
-        Btn trig;
-        trig.label = L"Trigonometry ";
-        trig.action = ACT_TRIG_MENU;
-        trig.style = Style::Flat;
-        trig.textDip = 12;
-        trig.rc = { keypad.left + gap, keypad.top, (keypad.left + keypad.right) / 2 - gap, keypad.top + controlHeight };
-        m_buttons.push_back(trig);
-
-        Btn func;
-        func.label = L"Function ";
-        func.action = ACT_FUNC_MENU;
-        func.style = Style::Flat;
-        func.textDip = 12;
-        func.rc = { (keypad.left + keypad.right) / 2 + gap, keypad.top, keypad.right - gap, keypad.top + controlHeight };
-        m_buttons.push_back(func);
-
+        const int third = (keypad.right - keypad.left) / 3;
+        static constexpr const wchar_t* kControlLabels[3] = { L"Trigonometry ", L"Inequalities ",
+                                                              L"Function " };
+        const int kControlActions[3] = { ACT_TRIG_MENU, ACT_INEQ_MENU, ACT_FUNC_MENU };
+        for (int i = 0; i < 3; ++i)
+        {
+            Btn control;
+            control.label = kControlLabels[i];
+            control.action = kControlActions[i];
+            control.style = Style::Flat;
+            control.textDip = 11;
+            control.rc = { keypad.left + i * third + gap, keypad.top, keypad.left + (i + 1) * third - gap,
+                           keypad.top + controlHeight };
+            m_buttons.push_back(control);
+        }
         keypad.top += controlHeight + Dp(2);
 
-        // Five columns: the scientific digits plus a column of the symbols an
-        // equation needs.
         struct GraphKey
         {
             const wchar_t* label;
             int action;
             Style style;
         };
-        static constexpr GraphKey keys[5][5] = {
-            { { L"x", ACT_GRAPH_TEXT_BASE + 0, Style::Operator }, { L"(", ACT_GRAPH_TEXT_BASE + 1, Style::Operator },
-              { L")", ACT_GRAPH_TEXT_BASE + 2, Style::Operator }, { L"^", ACT_GRAPH_TEXT_BASE + 3, Style::Operator },
+        static constexpr GraphKey keys[7][5] = {
+            { { L"2ⁿᵈ", ACT_SECOND, Style::Operator }, { L"π", ACT_GRAPH_TEXT_BASE + 22, Style::Operator },
+              { L"e", ACT_GRAPH_TEXT_BASE + 13, Style::Operator }, { L"C", ACT_GRAPH_CLEAR, Style::Operator },
               { L"", ACT_GRAPH_BACKSPACE, Style::Operator } },
-            { { L"7", ACT_GRAPH_TEXT_BASE + 4, Style::Number }, { L"8", ACT_GRAPH_TEXT_BASE + 5, Style::Number },
-              { L"9", ACT_GRAPH_TEXT_BASE + 6, Style::Number }, { L"÷", ACT_GRAPH_TEXT_BASE + 7, Style::Operator },
-              { L"π", ACT_GRAPH_TEXT_BASE + 8, Style::Operator } },
-            { { L"4", ACT_GRAPH_TEXT_BASE + 9, Style::Number }, { L"5", ACT_GRAPH_TEXT_BASE + 10, Style::Number },
-              { L"6", ACT_GRAPH_TEXT_BASE + 11, Style::Number }, { L"×", ACT_GRAPH_TEXT_BASE + 12, Style::Operator },
-              { L"e", ACT_GRAPH_TEXT_BASE + 13, Style::Operator } },
-            { { L"1", ACT_GRAPH_TEXT_BASE + 14, Style::Number }, { L"2", ACT_GRAPH_TEXT_BASE + 15, Style::Number },
-              { L"3", ACT_GRAPH_TEXT_BASE + 16, Style::Number }, { L"−", ACT_GRAPH_TEXT_BASE + 17, Style::Operator },
-              { L"|", ACT_GRAPH_TEXT_BASE + 18, Style::Operator } },
-            { { L"+/−", ACT_GRAPH_NEGATE, Style::Number }, { L"0", ACT_GRAPH_TEXT_BASE + 19, Style::Number },
-              { L".", ACT_GRAPH_TEXT_BASE + 20, Style::Number }, { L"+", ACT_GRAPH_TEXT_BASE + 21, Style::Operator },
-              { L"C", ACT_GRAPH_CLEAR, Style::Operator } },
+            { { L"x²", ACT_GRAPH_TEXT_BASE + 23, Style::Operator }, { L"¹/ₓ", ACT_GRAPH_TEXT_BASE + 24, Style::Operator },
+              { L"|x|", ACT_GRAPH_TEXT_BASE + 25, Style::Operator }, { L"x", ACT_GRAPH_TEXT_BASE + 0, Style::Operator },
+              { L"y", ACT_GRAPH_TEXT_BASE + 26, Style::Operator } },
+            { { L"²√x", ACT_GRAPH_TEXT_BASE + 27, Style::Operator }, { L"(", ACT_GRAPH_TEXT_BASE + 1, Style::Operator },
+              { L")", ACT_GRAPH_TEXT_BASE + 2, Style::Operator }, { L"=", ACT_GRAPH_TEXT_BASE + 28, Style::Operator },
+              { L"÷", ACT_GRAPH_TEXT_BASE + 7, Style::Operator } },
+            { { L"xʸ", ACT_GRAPH_TEXT_BASE + 3, Style::Operator }, { L"7", ACT_GRAPH_TEXT_BASE + 4, Style::Number },
+              { L"8", ACT_GRAPH_TEXT_BASE + 5, Style::Number }, { L"9", ACT_GRAPH_TEXT_BASE + 6, Style::Number },
+              { L"×", ACT_GRAPH_TEXT_BASE + 12, Style::Operator } },
+            { { L"10ˣ", ACT_GRAPH_TEXT_BASE + 29, Style::Operator }, { L"4", ACT_GRAPH_TEXT_BASE + 9, Style::Number },
+              { L"5", ACT_GRAPH_TEXT_BASE + 10, Style::Number }, { L"6", ACT_GRAPH_TEXT_BASE + 11, Style::Number },
+              { L"−", ACT_GRAPH_TEXT_BASE + 17, Style::Operator } },
+            { { L"log", ACT_GRAPH_TEXT_BASE + 30, Style::Operator }, { L"1", ACT_GRAPH_TEXT_BASE + 14, Style::Number },
+              { L"2", ACT_GRAPH_TEXT_BASE + 15, Style::Number }, { L"3", ACT_GRAPH_TEXT_BASE + 16, Style::Number },
+              { L"+", ACT_GRAPH_TEXT_BASE + 21, Style::Operator } },
+            { { L"ln", ACT_GRAPH_TEXT_BASE + 31, Style::Operator }, { L"(−)", ACT_GRAPH_NEGATE, Style::Number },
+              { L"0", ACT_GRAPH_TEXT_BASE + 19, Style::Number }, { L".", ACT_GRAPH_TEXT_BASE + 20, Style::Number },
+              { L"↵", ACT_GRAPH_ADD, Style::Accent } },
         };
 
         const int cellWidth = (keypad.right - keypad.left) / 5;
-        const int cellHeight = (keypad.bottom - keypad.top) / 5;
-        for (int row = 0; row < 5; ++row)
+        const int cellHeight = (keypad.bottom - keypad.top) / 7;
+        for (int row = 0; row < 7; ++row)
         {
             for (int column = 0; column < 5; ++column)
             {
@@ -5853,7 +6241,11 @@ namespace
                 button.label = key.label;
                 button.action = key.action;
                 button.style = key.style;
-                button.textDip = (key.style == Style::Number) ? 18 : 15;
+                button.textDip = (key.style == Style::Number) ? 17 : 14;
+                if (key.action == ACT_GRAPH_ADD)
+                {
+                    button.vicon = VIcon_Enter;
+                }
                 button.rc = { keypad.left + column * cellWidth + gap, keypad.top + row * cellHeight + gap,
                               keypad.left + (column + 1) * cellWidth - gap, keypad.top + (row + 1) * cellHeight - gap };
                 m_buttons.push_back(button);

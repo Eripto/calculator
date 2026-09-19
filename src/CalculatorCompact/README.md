@@ -92,7 +92,7 @@ corrected where it diverged:
 | Settings | The app theme is a `SettingsExpander` holding Light / Dark / Use system setting radio buttons, so clicking the card expands it instead of cycling the theme. About expands to the licence links, and the page closes with the "Send feedback" link and the contribute paragraph |
 | Chrome icons | Drawn as paths rather than font glyphs (see below) |
 
-### Why the chrome icons are vector paths
+### Why the icons are vector paths
 
 The hamburger, back arrow, history, keep-on-top, backspace, chevrons, calendar,
 gear, radio buttons and the two settings header icons are drawn with GDI+ paths
@@ -103,8 +103,10 @@ Font glyphs were the obvious choice and the wrong one. `Segoe Fluent Icons` and
 text-presentation characters the code fell back on can be substituted by a
 colour emoji font -- which puts blue and orange into a title bar that is
 supposed to be monochrome. Paths render identically everywhere and cannot be
-recoloured by font substitution. The navigation pane's category icons still come
-from the icon font, and their codepoints match `NavCategory.cs` exactly.
+recoloured by font substitution. The navigation pane's category icons went the same way for the
+same reason: several of their codepoints -- Programmer, Volume, Weight and
+mass, Temperature, Speed, Data among them -- came up as empty boxes on a real
+machine even though the font was present.
 
 
 ## Building
@@ -211,11 +213,17 @@ stops at the origin; a jump larger than four times the view height breaks it
 too, which is what keeps the two branches of `1/x` from being joined by a line
 through the asymptote. Curves are sampled once per pixel column.
 
-Pan by dragging the plot, zoom with the wheel or the three buttons in the
-corner. Equations are typed directly or entered from the keypad, and the
-Trigonometry and Function flyouts — shared with the scientific keypad — write
-their function into the equation here instead of sending a command to the
-engine.
+The mode follows `GraphingCalculator.xaml`'s shape: a two-tab toggle in the
+title bar switches between the plot and the equation editor rather than
+stacking both. The plot fills its view, with the axes tipped by arrowheads and
+labelled with an italic `x` and `y` and a single `0` at the origin -- no
+numeric ticks, as the shipping graph has none. Trace, share and graph options
+sit on a card in the top trailing corner, zoom and recentre on another in the
+bottom one. The editor carries the `f` badge and expression field, the
+Trigonometry / Inequalities / Function dropdowns, and the same five-by-seven
+keypad the shipping app uses, down to `x`, `y`, `(−)` and the return key.
+
+Pan by dragging the plot, zoom with the wheel or the buttons in the corner.
 
 The whole mode costs 25 KB of the binary.
 
