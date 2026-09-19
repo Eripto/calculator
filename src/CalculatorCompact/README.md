@@ -1,7 +1,7 @@
 # Calculator (compact build)
 
 A native Win32 front end for the Windows Calculator engine in this repository,
-built as a single self-contained `Calculator.exe` of **under 425 KB**.
+built as a single self-contained `Calculator.exe` of **under 350 KB**.
 
 The arithmetic and the unit conversions are not reimplementations:
 `src/CalcManager` — the same engine the shipping app uses, including the Ratpack
@@ -117,7 +117,7 @@ sudo apt-get install mingw-w64
 ./build.sh --arch i686          # 32-bit (note: larger, see below)
 ```
 
-`build.sh` fails if the binary exceeds the size budget (425 KB by default,
+`build.sh` fails if the binary exceeds the size budget (350 KB by default,
 override with `CALC_SIZE_BUDGET_KB`).
 
 ## Tests
@@ -160,6 +160,29 @@ The engine edits are behaviour-preserving. The decimal parser is the only one
 with real substance, and it is verified against the original expression; the
 rest are dead-code guards, container and field-layout swaps, and formatting
 calls with identical output.
+
+### A second pass, after the graphing mode
+
+Adding graphing pushed the binary to 399 KB. A linker map (`-Wl,-Map`) put it
+back under 350 KB without changing a single drawn pixel:
+
+| Change | Saved |
+| --- | --- |
+| Link-time optimisation, which ICEd on the first attempt but works with `-flto-partition=none` | ~52 KB |
+| Force-including a prelude that sets `_GLIBCXX_EXTERN_TEMPLATE` to -1, so `std::wstring`'s members are emitted locally and `--gc-sections` can drop the unused ones instead of linking all of libstdc++'s `wstring-inst.o` | ~22 KB |
+| `GetLocalTime` in place of `time` + `localtime_s`, and `RtlGenRandom` — which is what `rand_s` calls — in place of `rand_s`, dropping both CRT shims and the secure-parameter handler behind them | ~10 KB linked, most of it absorbed by PE section alignment |
+| `--disable-runtime-pseudo-reloc`; nothing here relies on auto-import | — |
+
+409,088 bytes to 327,680. Every mode was captured before and after, including
+the arithmetic and divide-by-zero paths, and compared channel by channel: zero
+differing pixels across all eight.
+
+Two things were measured and then rejected rather than kept. Replacing libm's
+`pow`, `cbrt` and inverse hyperbolics with identities built from `log`, `exp`
+and `sqrt` saves about 13 KB, but it moves results by a few ulp; LTO alone made
+the target, so precision stayed exactly as it was. And `-fno-exceptions` on the
+UI translation units is not available at all — `main.cpp` catches what the
+engine throws.
 
 Three things that did *not* work, for the record: LTO ICEs in GCC 13's
 mingw-w64 (`binds_to_current_def_p`); `-fno-asynchronous-unwind-tables` makes

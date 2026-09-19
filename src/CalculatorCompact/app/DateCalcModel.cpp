@@ -3,6 +3,11 @@
 
 #include "DateCalcModel.h"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <ctime>
 
 #include "Header Files/NumericString.h"
@@ -89,18 +94,27 @@ namespace CalcCompact
 
         CivilDate Today()
         {
+#if defined(_WIN32)
+            // GetLocalTime rather than time() plus localtime_s: the CRT's
+            // 64-bit localtime and the secure-parameter handler behind it are
+            // ~9KB of the binary, and this is the only call site.
+            SYSTEMTIME now{};
+            GetLocalTime(&now);
+            CivilDate date;
+            date.year = now.wYear;
+            date.month = now.wMonth;
+            date.day = now.wDay;
+            return date;
+#else
             const std::time_t now = std::time(nullptr);
             std::tm local{};
-#if defined(_WIN32)
-            localtime_s(&local, &now);
-#else
             localtime_r(&now, &local);
-#endif
             CivilDate date;
             date.year = local.tm_year + 1900;
             date.month = local.tm_mon + 1;
             date.day = local.tm_mday;
             return date;
+#endif
         }
 
         CivilDate AddMonths(const CivilDate& date, long long months)

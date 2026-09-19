@@ -33,20 +33,24 @@ command -v "$CXX" >/dev/null || { echo "error: $CXX not found (apt-get install m
 OBJ="$OUT/obj"
 mkdir -p "$OBJ"
 
-# -Os plus section GC and --strip-all is what keeps the binary small; the engine
-# needs exceptions (CalcErr) but uses no RTTI.
+# -Os plus LTO, section GC and --strip-all is what keeps the binary small; the
+# engine needs exceptions (CalcErr) but uses no RTTI.
+#
+# LTO ICEd on an earlier attempt (binds_to_current_def_p, GCC 13 mingw);
+# -flto-partition=none avoids it, and is worth ~58KB.
 CXXFLAGS=(
-  -std=c++20 -Os -DNDEBUG -DUNICODE -D_UNICODE
+  -std=c++20 -Os -flto=1 -flto-partition=none -ffat-lto-objects -DNDEBUG -DUNICODE -D_UNICODE
   -municode -fno-rtti
   -ffunction-sections -fdata-sections
   -fno-ident -fmerge-all-constants
   -Wall -Wno-unknown-pragmas
+  -include "$ROOT/app/stdcxx_prelude.h"
   -I"$ENGINE" -I"$ENGINE/Header Files" -I"$ROOT/app"
 )
 
 LDFLAGS=(
-  -municode -mwindows -static
-  -Wl,--gc-sections -Wl,--strip-all -Wl,--no-insert-timestamp
+  -municode -mwindows -static -flto=1 -flto-partition=none -Os
+  -Wl,--gc-sections -Wl,--strip-all -Wl,--no-insert-timestamp -Wl,--disable-runtime-pseudo-reloc
 )
 
 LIBS=(-lgdiplus -lmsimg32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -luuid -lmsvcrt)
@@ -87,7 +91,7 @@ echo "==> linking"
 
 SIZE=$(stat -c %s "$OUT/Calculator.exe")
 printf '==> %s\n    %s bytes (%s KB)\n' "$OUT/Calculator.exe" "$SIZE" "$((SIZE / 1024))"
-BUDGET_KB="${CALC_SIZE_BUDGET_KB:-425}"
+BUDGET_KB="${CALC_SIZE_BUDGET_KB:-350}"
 if (( SIZE > BUDGET_KB * 1024 )); then
   echo "    ERROR: over the ${BUDGET_KB} KB budget" >&2
   exit 1

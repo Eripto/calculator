@@ -13,9 +13,9 @@
 * Author:
 \****************************************************************************/
 
-// Must precede <cstdlib> so the CRT declares rand_s.
 #if defined(_WIN32)
-#define _CRT_RAND_S
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #endif
 
 #include <array>
@@ -1242,14 +1242,24 @@ double CCalcEngine::GenerateRandomNumber()
         // std::runtime_error, and that single reference pulls <stdexcept> and
         // the narrow std::string instantiations into every binary that links
         // the engine (~60KB).
+        //
+        // RtlGenRandom is what the CRT's rand_s calls; going to it directly
+        // drops rand_s's shim and the secure-parameter handler behind it,
+        // another ~7KB, for the same bytes from the same source. It is resolved
+        // at run time because the name it exports is SystemFunction036.
         std::array<unsigned int, 8> entropy{};
-        for (auto& word : entropy)
+        using RtlGenRandomFn = BOOLEAN(WINAPI*)(PVOID, ULONG);
+        static const auto generate = reinterpret_cast<RtlGenRandomFn>(
+            reinterpret_cast<void*>(GetProcAddress(LoadLibraryW(L"advapi32.dll"), "SystemFunction036")));
+        const bool filled = (generate != nullptr)
+            && generate(entropy.data(), static_cast<ULONG>(entropy.size() * sizeof(unsigned int)));
+        if (!filled)
         {
-            if (rand_s(&word) != 0)
+            // Only reachable when the OS RNG is unavailable; prefer weak
+            // entropy over a fixed seed.
+            static unsigned int counter = 0;
+            for (auto& word : entropy)
             {
-                // rand_s only fails when the OS RNG is unavailable; prefer
-                // weak entropy over a fixed seed.
-                static unsigned int counter = 0;
                 word = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(&word)) ^ (++counter * 2654435761u);
             }
         }
