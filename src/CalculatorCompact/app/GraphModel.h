@@ -66,6 +66,16 @@ namespace Graphing
         Exp,
     };
 
+    // The graph options pane offers the same three angle units the scientific
+    // keypad does; trigonometric arguments and inverse results are converted
+    // against whichever is chosen.
+    enum class AngleMode
+    {
+        Radians,
+        Degrees,
+        Gradians,
+    };
+
     struct Instruction
     {
         Op op;
@@ -81,7 +91,7 @@ namespace Graphing
         // Returns false and leaves the program empty if the text does not parse.
         bool Compile(const std::wstring& text);
 
-        double Evaluate(double x) const;
+        double Evaluate(double x, AngleMode angle = AngleMode::Radians) const;
 
         bool Empty() const
         {

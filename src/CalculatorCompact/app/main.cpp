@@ -551,6 +551,12 @@ namespace
         ACT_GRAPH_SHARE,
         ACT_GRAPH_OPTIONS,
         ACT_INEQ_MENU,
+        ACT_GRAPH_ANGLE_RAD,
+        ACT_GRAPH_ANGLE_DEG,
+        ACT_GRAPH_ANGLE_GRAD,
+        ACT_GRAPH_THEME_LIGHT,
+        ACT_GRAPH_THEME_APP,
+        ACT_GRAPH_THICKNESS,
         ACT_ALWAYS_ON_TOP,
         ACT_APP_THEME,
         ACT_SETTINGS,
@@ -595,6 +601,7 @@ namespace
         ACT_GRAPH_SELECT_BASE = 21000, // + equation index
         ACT_GRAPH_REMOVE_BASE = 21100, // + equation index
         ACT_GRAPH_TEXT_BASE = 21200,   // + index into the keypad's character table
+        ACT_GRAPH_FIELD_BASE = 21400,  // + window field 0..3
     };
 
     static_assert(ACT_MEM_SUB < ACT_BIT_BASE, "scalar actions must stay below the ranged actions");
@@ -1104,6 +1111,57 @@ namespace
             m_graphYMax = centreY + halfY;
         }
 
+        // The four window fields show the live view unless one is being typed
+        // into, in which case that one shows what has been typed so far.
+        std::wstring GraphFieldText(int index) const
+        {
+            if (index == m_graphField && !m_graphFieldText[index].empty())
+            {
+                return m_graphFieldText[index];
+            }
+            const double value = (index == 0) ? m_graphXMin : (index == 1) ? m_graphXMax
+                                 : (index == 2) ? m_graphYMin : m_graphYMax;
+            std::wstring text = CalcEngine::NumericString::FixedPoint(value, 4);
+            while (!text.empty() && text.back() == L'0')
+            {
+                text.pop_back();
+            }
+            if (!text.empty() && text.back() == L'.')
+            {
+                text.pop_back();
+            }
+            return text;
+        }
+
+        // Applies whatever was typed into a field, ignoring anything that does
+        // not leave a usable range.
+        void CommitGraphField()
+        {
+            if (m_graphField < 0 || m_graphFieldText[m_graphField].empty())
+            {
+                m_graphField = -1;
+                return;
+            }
+            const double value = CalcEngine::NumericString::ToDouble(m_graphFieldText[m_graphField]);
+            double xMin = m_graphXMin, xMax = m_graphXMax, yMin = m_graphYMin, yMax = m_graphYMax;
+            switch (m_graphField)
+            {
+            case 0: xMin = value; break;
+            case 1: xMax = value; break;
+            case 2: yMin = value; break;
+            default: yMax = value; break;
+            }
+            if (xMax - xMin > 1e-6 && yMax - yMin > 1e-6 && (xMax - xMin) < 1e9 && (yMax - yMin) < 1e9)
+            {
+                m_graphXMin = xMin;
+                m_graphXMax = xMax;
+                m_graphYMin = yMin;
+                m_graphYMax = yMax;
+            }
+            m_graphFieldText[m_graphField].clear();
+            m_graphField = -1;
+        }
+
         void ResetGraph()
         {
             m_graphXMin = -10.0;
@@ -1410,6 +1468,14 @@ namespace
         // two-tab toggle in the title bar between them, rather than stacking
         // both. It opens on the plot.
         bool m_graphEquationsView = false;
+        // Graph options, as the shipping pane offers them.
+        bool m_graphOptionsOpen = false;
+        Graphing::AngleMode m_graphAngle = Graphing::AngleMode::Radians;
+        int m_graphThickness = 1;      // 0 thin, 1 medium, 2 thick
+        bool m_graphAlwaysLight = true;
+        int m_graphField = -1;         // which window field is being edited
+        std::wstring m_graphFieldText[4];
+        RECT m_graphOptionsRect{};
         bool m_graphDragging = false;
         POINT m_graphDragFrom{};
         double m_graphDragXMin = 0.0;
@@ -1462,6 +1528,7 @@ namespace
         void BuildConverterLayout(int contentRight, int height, int y);
         void BuildDateLayout(int contentRight, int height, int y);
         void BuildGraphingLayout(int contentRight, int height, int y);
+        void BuildGraphOptions(int contentRight, int height);
         void BuildNavLayout(int width, int height);
         void BuildSettingsLayout(int width, int height);
 
@@ -3218,7 +3285,7 @@ namespace
                 {
                     continue;
                 }
-                Gdiplus::Pen curve(ToGp(EquationColour(equation.colour)), 2.0f);
+                Gdiplus::Pen curve(ToGp(EquationColour(equation.colour)), 1.0f + static_cast<float>(app.m_graphThickness));
                 curve.SetLineJoin(Gdiplus::LineJoinRound);
 
                 points.clear();
@@ -3228,7 +3295,7 @@ namespace
                 for (int px = 0; px <= width; ++px)
                 {
                     const double x = xMin + xSpan * static_cast<double>(px) / static_cast<double>(width);
-                    const double y = equation.expression.Evaluate(x);
+                    const double y = equation.expression.Evaluate(x, app.m_graphAngle);
 
                     const bool usable = std::isfinite(y);
                     const bool jumped = havePrevious && std::fabs(y - previous) > breakThreshold;
@@ -3350,6 +3417,112 @@ namespace
         if (app.m_activeEquation < 0 || app.m_activeEquation >= static_cast<int>(app.m_equations.size()))
         {
             app.m_activeEquation = 0;
+        }
+    }
+
+    // The graph options pane, drawn over the plot.
+    void PaintGraphOptions(HDC hdc, CalcApp& app)
+    {
+        if (!app.m_graphOptionsOpen || app.m_graphEquationsView)
+        {
+            return;
+        }
+        const RECT& panel = app.m_graphOptionsRect;
+        if (panel.right <= panel.left)
+        {
+            return;
+        }
+
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        FillRounded(g, panel, Dp(8), g_theme.card);
+        {
+            Gdiplus::Pen outline(ToGp(g_theme.divider));
+            Gdiplus::GraphicsPath path;
+            const int r = Dp(8);
+            path.AddArc(panel.left, panel.top, r * 2, r * 2, 180.0f, 90.0f);
+            path.AddArc(panel.right - r * 2, panel.top, r * 2, r * 2, 270.0f, 90.0f);
+            path.AddArc(panel.right - r * 2, panel.bottom - r * 2, r * 2, r * 2, 0.0f, 90.0f);
+            path.AddArc(panel.left, panel.bottom - r * 2, r * 2, r * 2, 90.0f, 90.0f);
+            path.CloseFigure();
+            g.DrawPath(&outline, &path);
+        }
+
+        const int left = panel.left + Dp(12);
+        RECT title{ left, panel.top + Dp(10), panel.right - Dp(12), panel.top + Dp(42) };
+        DrawLabel(hdc, title, L"Graph options", 20, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER,
+                  FW_SEMIBOLD);
+
+        const auto section = [&](const wchar_t* text, int top) {
+            RECT rc{ left, top, panel.right - Dp(12), top + Dp(18) };
+            DrawLabel(hdc, rc, text, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        };
+
+        // Each section header sits just above the controls the layout placed.
+        const Btn* firstField = nullptr;
+        const Btn* firstUnit = nullptr;
+        const Btn* thickness = nullptr;
+        const Btn* firstTheme = nullptr;
+        for (const Btn& b : app.m_buttons)
+        {
+            if (b.action == ACT_GRAPH_FIELD_BASE && firstField == nullptr) firstField = &b;
+            if (b.action == ACT_GRAPH_ANGLE_RAD && firstUnit == nullptr) firstUnit = &b;
+            if (b.action == ACT_GRAPH_THICKNESS && thickness == nullptr) thickness = &b;
+            if (b.action == ACT_GRAPH_THEME_LIGHT && firstTheme == nullptr) firstTheme = &b;
+        }
+
+        if (firstField != nullptr)
+        {
+            section(L"Window", firstField->rc.top - Dp(38));
+            static constexpr const wchar_t* kFieldLabels[4] = { L"X-Min", L"X-Max", L"Y-Min", L"Y-Max" };
+            for (int i = 0; i < 4; ++i)
+            {
+                const Btn* field = nullptr;
+                for (const Btn& b : app.m_buttons)
+                {
+                    if (b.action == ACT_GRAPH_FIELD_BASE + i)
+                    {
+                        field = &b;
+                        break;
+                    }
+                }
+                if (field == nullptr)
+                {
+                    continue;
+                }
+                RECT caption{ field->rc.left, field->rc.top - Dp(18), field->rc.right, field->rc.top - Dp(2) };
+                DrawLabel(hdc, caption, kFieldLabels[i], 12, g_theme.secondaryText, false,
+                          DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+                Gdiplus::Pen border(ToGp(app.m_graphField == i ? g_theme.accent : g_theme.divider));
+                g.DrawRectangle(&border, Gdiplus::Rect(field->rc.left, field->rc.top,
+                                                       field->rc.right - field->rc.left - 1,
+                                                       field->rc.bottom - field->rc.top - 1));
+                std::wstring value = app.GraphFieldText(i);
+                if (app.m_graphField == i)
+                {
+                    value += L"|";
+                }
+                RECT text{ field->rc.left + Dp(8), field->rc.top, field->rc.right - Dp(8), field->rc.bottom };
+                DrawLabel(hdc, text, value, 14, g_theme.primaryText, false,
+                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+        }
+        if (firstUnit != nullptr)
+        {
+            section(L"Units", firstUnit->rc.top - Dp(20));
+        }
+        if (thickness != nullptr)
+        {
+            section(L"Line thickness", thickness->rc.top - Dp(20));
+            // A sample of the width the curves are drawn at.
+            Gdiplus::Pen sample(ToGp(g_theme.primaryText), 1.0f + static_cast<float>(app.m_graphThickness));
+            const int centre = (thickness->rc.top + thickness->rc.bottom) / 2;
+            g.DrawLine(&sample, thickness->rc.left + Dp(10), centre, thickness->rc.right - Dp(40), centre);
+        }
+        if (firstTheme != nullptr)
+        {
+            section(L"Graph theme", firstTheme->rc.top - Dp(20));
         }
     }
 
@@ -3900,6 +4073,7 @@ namespace
         if (app.m_mode == Mode::Graphing)
         {
             PaintGraphPlot(hdc, app);
+            PaintGraphOptions(hdc, app);
         }
 
         // --- shapes -------------------------------------------------------
@@ -3935,6 +4109,13 @@ namespace
             for (size_t i = 0; i < app.m_buttons.size(); ++i)
             {
                 const Btn& b = app.m_buttons[i];
+                if (b.radio)
+                {
+                    RECT box{ b.rc.left + Dp(2), b.rc.top, b.rc.left + Dp(34), b.rc.bottom };
+                    DrawVectorIcon(g, box, b.checked ? VIcon_RadioOn : VIcon_RadioOff,
+                                   b.checked ? g_theme.accent : g_theme.secondaryText, 19);
+                    continue;
+                }
                 const int id = (b.vicon != VIcon_None) ? b.vicon : VIconForGlyph(b.label);
                 if (id == VIcon_None)
                 {
@@ -4002,6 +4183,12 @@ namespace
             {
                 RECT text = rc;
                 text.left += Dp(44); // clear of the leading glyph
+                DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            else if (b.radio)
+            {
+                RECT text = rc;
+                text.left += Dp(38);
                 DrawLabel(hdc, text, b.label, dip, color, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             }
             else if (IsVariableKey(b.action))
@@ -4212,12 +4399,20 @@ namespace
         }
         BitBlt(layer, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
         SetBkMode(layer, TRANSPARENT);
+
+        // The lift belongs to the flyout, so it is applied to the flyout's own
+        // drawing inside the layer. Blending the layer at an offset instead --
+        // which is what this used to do -- slid the entire window down by up to
+        // 10px for the length of the fade.
+        POINT previousOrigin{};
+        SetViewportOrgEx(layer, 0, lift, &previousOrigin);
         PaintFlyout(layer);
+        SetViewportOrgEx(layer, previousOrigin.x, previousOrigin.y, nullptr);
 
         BLENDFUNCTION blend{};
         blend.BlendOp = AC_SRC_OVER;
         blend.SourceConstantAlpha = static_cast<BYTE>(255.0f * menu);
-        AlphaBlend(hdc, 0, lift, width, height - lift, layer, 0, 0, width, height - lift, blend);
+        AlphaBlend(hdc, 0, 0, width, height, layer, 0, 0, width, height, blend);
     }
 
     // Composites the frame: content (faded and lifted while a mode is entering)
@@ -4718,6 +4913,20 @@ namespace
             return;
         }
 
+        if (action >= ACT_GRAPH_FIELD_BASE)
+        {
+            const int index = action - ACT_GRAPH_FIELD_BASE;
+            if (index >= 0 && index < 4)
+            {
+                if (app.m_graphField != index)
+                {
+                    app.CommitGraphField();
+                }
+                app.m_graphField = index;
+            }
+            app.Relayout();
+            return;
+        }
         if (action >= ACT_GRAPH_TEXT_BASE)
         {
             // The keypad's characters, indexed the way BuildGraphingLayout
@@ -5013,12 +5222,32 @@ namespace
             app.StartContentEnter();
             app.Relayout();
             break;
+        case ACT_GRAPH_OPTIONS:
+            app.CommitGraphField();
+            app.m_graphOptionsOpen = !app.m_graphOptionsOpen;
+            app.Relayout();
+            break;
+        case ACT_GRAPH_ANGLE_RAD:
+        case ACT_GRAPH_ANGLE_DEG:
+        case ACT_GRAPH_ANGLE_GRAD:
+            app.m_graphAngle = (action == ACT_GRAPH_ANGLE_DEG)    ? Graphing::AngleMode::Degrees
+                               : (action == ACT_GRAPH_ANGLE_GRAD) ? Graphing::AngleMode::Gradians
+                                                                  : Graphing::AngleMode::Radians;
+            app.Relayout();
+            break;
+        case ACT_GRAPH_THICKNESS:
+            app.m_graphThickness = (app.m_graphThickness + 1) % 3;
+            app.Relayout();
+            break;
+        case ACT_GRAPH_THEME_LIGHT:
+        case ACT_GRAPH_THEME_APP:
+            app.m_graphAlwaysLight = (action == ACT_GRAPH_THEME_LIGHT);
+            app.Relayout();
+            break;
         case ACT_GRAPH_TRACE:
         case ACT_GRAPH_SHARE:
-        case ACT_GRAPH_OPTIONS:
-            // Present for layout fidelity; tracing and the options pane need
-            // the analysis the solver would provide, and sharing a plot has
-            // nowhere to go from here.
+            // Laid out for fidelity; tracing needs the analysis the solver
+            // would provide, and sharing a plot has nowhere to go from here.
             break;
         case ACT_GRAPH_ADD:
         {
@@ -5524,6 +5753,12 @@ namespace
             app.Relayout();
             return 0;
 
+        case WM_CAPTURECHANGED:
+            // Losing capture another way would otherwise leave the pan latched
+            // on, and with it every mouse move swallowed.
+            app.m_graphDragging = false;
+            return 0;
+
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED)
             {
@@ -5678,8 +5913,14 @@ namespace
             }
 
             // A press inside the plot that did not land on a zoom control starts
-            // a pan.
-            if (app.m_mode == Mode::Graphing && app.m_pressed < 0 && PtInRect(&app.m_graphRect, pt))
+            // a pan -- but only when the plot is actually what was clicked. The
+            // navigation pane, the settings page and the flyouts all cover the
+            // plot rect, and while one of those is up m_pressed stays -1, so
+            // without this a click on a navigation item began a pan and the
+            // button-up that should have switched modes was swallowed by it.
+            const bool plotIsFrontmost = !app.NavVisible() && !app.SettingsVisible() && !app.m_menuOpen;
+            if (app.m_mode == Mode::Graphing && plotIsFrontmost && app.m_pressed < 0 && app.m_pressedNav < 0
+                && PtInRect(&app.m_graphRect, pt))
             {
                 app.m_graphDragging = true;
                 app.m_graphDragFrom = pt;
@@ -5778,9 +6019,35 @@ namespace
             {
                 if (app.m_mode == Mode::Graphing)
                 {
+                    const auto c = static_cast<wchar_t>(wParam);
+                    if (app.m_graphField >= 0)
+                    {
+                        // A window bound is being edited, so it takes the keys.
+                        std::wstring& value = app.m_graphFieldText[app.m_graphField];
+                        if (c == L'\b')
+                        {
+                            if (value.empty())
+                            {
+                                value = app.GraphFieldText(app.m_graphField);
+                            }
+                            if (!value.empty())
+                            {
+                                value.pop_back();
+                            }
+                        }
+                        else if (c == L'\r')
+                        {
+                            app.CommitGraphField();
+                        }
+                        else if ((c >= L'0' && c <= L'9') || c == L'.' || c == L'-')
+                        {
+                            value.push_back(c);
+                        }
+                        app.Relayout();
+                        return 0;
+                    }
                     // The equation rows take typed text directly; the keypad is
                     // a convenience, not the only way in.
-                    const auto c = static_cast<wchar_t>(wParam);
                     if (c == L'\b')
                     {
                         app.BackspaceEquation();
@@ -6100,6 +6367,99 @@ namespace
 
     // Graphing: the plot on top, the equation list under it, and a keypad
     // carrying the graphing numpad's function set.
+    // The graph options pane, following the shipping one: a window section
+    // with the four bounds and a reset link, the angle units, line thickness
+    // and the graph theme.
+    void CalcApp::BuildGraphOptions(int contentRight, int height)
+    {
+        const int left = Dp(10);
+        const int right = contentRight - Dp(10);
+        // Below the trace/share/options row, which stays visible above it.
+        const int top = Dp(kNavRowDip) + Dp(44);
+        int y = top + Dp(46); // clear of the title
+
+        const auto sectionGap = [&] { y += Dp(22); };
+
+        Btn reset;
+        reset.label = L"Reset view";
+        reset.action = ACT_GRAPH_RESET;
+        reset.style = Style::Bit;
+        reset.textDip = 13;
+        reset.accentText = true;
+        reset.rc = { right - Dp(96), top + Dp(12), right - Dp(12), top + Dp(38) };
+        m_buttons.push_back(reset);
+
+        // Window: four bounds, two to a row, each under its caption.
+        sectionGap();
+        const int fieldWidth = (right - left - Dp(36)) / 2;
+        for (int i = 0; i < 4; ++i)
+        {
+            const int column = i % 2;
+            const int row = i / 2;
+            const int fx = left + Dp(12) + column * (fieldWidth + Dp(12));
+            const int fy = y + Dp(18) + row * Dp(54);
+            Btn field;
+            field.action = ACT_GRAPH_FIELD_BASE + i;
+            field.style = Style::Bit;
+            field.textDip = 14;
+            field.checked = (m_graphField == i);
+            field.rc = { fx, fy, fx + fieldWidth, fy + Dp(32) };
+            m_buttons.push_back(field);
+        }
+        y += Dp(18) + Dp(54) + Dp(32) + Dp(6);
+
+        // Units.
+        sectionGap();
+        const int unitWidth = (right - left - Dp(28)) / 3;
+        const int unitActions[3] = { ACT_GRAPH_ANGLE_RAD, ACT_GRAPH_ANGLE_DEG, ACT_GRAPH_ANGLE_GRAD };
+        static constexpr const wchar_t* kUnitLabels[3] = { L"Radians", L"Degrees", L"Gradians" };
+        for (int i = 0; i < 3; ++i)
+        {
+            Btn unit;
+            unit.label = kUnitLabels[i];
+            unit.action = unitActions[i];
+            unit.style = Style::Toggle;
+            unit.textDip = 13;
+            unit.checked = (static_cast<int>(m_graphAngle) == i);
+            unit.rc = { left + Dp(12) + i * (unitWidth + Dp(2)), y, left + Dp(12) + i * (unitWidth + Dp(2)) + unitWidth,
+                        y + Dp(32) };
+            m_buttons.push_back(unit);
+        }
+        y += Dp(32);
+
+        // Line thickness.
+        sectionGap();
+        Btn thickness;
+        thickness.action = ACT_GRAPH_THICKNESS;
+        thickness.style = Style::Bit;
+        thickness.textDip = 13;
+        thickness.combo = true;
+        thickness.rc = { left + Dp(12), y, right - Dp(12), y + Dp(32) };
+        m_buttons.push_back(thickness);
+        y += Dp(32);
+
+        // Graph theme.
+        sectionGap();
+        const int themeActions[2] = { ACT_GRAPH_THEME_LIGHT, ACT_GRAPH_THEME_APP };
+        static constexpr const wchar_t* kThemeLabels[2] = { L"Always light", L"Match app theme" };
+        for (int i = 0; i < 2; ++i)
+        {
+            Btn choice;
+            choice.label = kThemeLabels[i];
+            choice.action = themeActions[i];
+            choice.style = Style::Bit;
+            choice.textDip = 14;
+            choice.radio = true;
+            choice.checked = (i == 0) ? m_graphAlwaysLight : !m_graphAlwaysLight;
+            choice.rc = { left + Dp(12), y + i * Dp(32), right - Dp(12), y + i * Dp(32) + Dp(30) };
+            m_buttons.push_back(choice);
+        }
+        y += Dp(32) * 2 + Dp(10);
+
+        // The card is sized to whatever the sections needed.
+        m_graphOptionsRect = { left, top, right, (std::min)(y, height - Dp(10)) };
+    }
+
     // Graphing, laid out as GraphingCalculator.xaml has it: the title bar
     // carries a two-tab toggle, and the body shows either the plot or the
     // equation editor with its keypad -- not both stacked.
@@ -6132,6 +6492,11 @@ namespace
                 button.rc = { bx, m_graphRect.top + Dp(8), bx + size, m_graphRect.top + Dp(8) + size };
                 m_buttons.push_back(button);
                 bx -= size + Dp(4);
+            }
+
+            if (m_graphOptionsOpen)
+            {
+                BuildGraphOptions(contentRight, height);
             }
 
             // Zoom and recentre stacked in the bottom trailing corner.

@@ -464,8 +464,15 @@ namespace Graphing
         return true;
     }
 
-    double Expression::Evaluate(double x) const
+    double Expression::Evaluate(double x, AngleMode angle) const
     {
+        // Degrees and gradians scale the argument going into a circular
+        // function and the result coming out of its inverse.
+        const double toRadians = (angle == AngleMode::Degrees)    ? (kPi / 180.0)
+                                 : (angle == AngleMode::Gradians) ? (kPi / 200.0)
+                                                                  : 1.0;
+        const double fromRadians = 1.0 / toRadians;
+
         // A fixed stack: the parser cannot emit a program that needs more than
         // its own nesting depth, and an equation that deep is not worth a heap
         // allocation per sample.
@@ -524,18 +531,18 @@ namespace Graphing
             switch (instruction.op)
             {
             case Op::Negate: push(-a); break;
-            case Op::Sin: push(std::sin(a)); break;
-            case Op::Cos: push(std::cos(a)); break;
-            case Op::Tan: push(std::tan(a)); break;
-            case Op::Sec: push(1.0 / std::cos(a)); break;
-            case Op::Csc: push(1.0 / std::sin(a)); break;
-            case Op::Cot: push(1.0 / std::tan(a)); break;
-            case Op::Asin: push(std::asin(a)); break;
-            case Op::Acos: push(std::acos(a)); break;
-            case Op::Atan: push(std::atan(a)); break;
-            case Op::Asec: push(std::acos(1.0 / a)); break;
-            case Op::Acsc: push(std::asin(1.0 / a)); break;
-            case Op::Acot: push(std::atan(1.0 / a)); break;
+            case Op::Sin: push(std::sin(a * toRadians)); break;
+            case Op::Cos: push(std::cos(a * toRadians)); break;
+            case Op::Tan: push(std::tan(a * toRadians)); break;
+            case Op::Sec: push(1.0 / std::cos(a * toRadians)); break;
+            case Op::Csc: push(1.0 / std::sin(a * toRadians)); break;
+            case Op::Cot: push(1.0 / std::tan(a * toRadians)); break;
+            case Op::Asin: push(std::asin(a) * fromRadians); break;
+            case Op::Acos: push(std::acos(a) * fromRadians); break;
+            case Op::Atan: push(std::atan(a) * fromRadians); break;
+            case Op::Asec: push(std::acos(1.0 / a) * fromRadians); break;
+            case Op::Acsc: push(std::asin(1.0 / a) * fromRadians); break;
+            case Op::Acot: push(std::atan(1.0 / a) * fromRadians); break;
             case Op::Sinh: push(std::sinh(a)); break;
             case Op::Cosh: push(std::cosh(a)); break;
             case Op::Tanh: push(std::tanh(a)); break;
