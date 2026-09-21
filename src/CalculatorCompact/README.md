@@ -316,6 +316,48 @@ has merely loaded user32, gdi32 and the CRT is past a megabyte before it draws
 anything. What was achievable was removing the churn, and that is what the table
 above measures.
 
+## Making it the system calculator
+
+`tools/Install-Calculator.ps1` puts this build where Windows looks for a
+calculator, and `-Action Uninstall` puts everything back. Double-clicking
+`tools/Install-Calculator.cmd` does the same thing and asks for administrator
+first.
+
+    .\Install-Calculator.ps1                 # install
+    .\Install-Calculator.ps1 -Action Status   # report, changes nothing
+    .\Install-Calculator.ps1 -Action Uninstall
+
+Nothing it does overwrites a Windows file. `C:\Windows\System32\calc.exe` is
+owned by TrustedInstaller and covered by Windows Resource Protection, so
+replacing it means taking ownership of a system binary and then watching `sfc`
+or the next cumulative update restore it. The script uses the redirection
+Windows already provides instead:
+
+| What | Where | Needs admin |
+| --- | --- | --- |
+| `calc.exe` and `win32calc.exe` | Image File Execution Options `Debugger` value | yes |
+| The keyboard Calculator key | `HKCU\...\Explorer\AppKey\18` | no |
+| Start menu and search | a shortcut named Calculator | no |
+| The `calculator:` protocol | `HKCU\Software\Classes\calculator` | no |
+
+Each original value is read before it is overwritten and saved to
+`install-state.json` beside the installed exe, and Uninstall restores those
+values rather than deleting the keys -- so if something else already owned one
+of them, it gets it back.
+
+Two things it cannot do on its own. The Start tile and the `calculator:`
+protocol belong to the Store app for as long as that app is registered, so
+`-RemoveStoreApp` unregisters it for the current user; Uninstall re-registers
+it from the package files, which are left on disk. And Windows Update may
+reinstall the Store app on its own schedule, which does not disturb any of the
+above -- re-run with `-RemoveStoreApp` if you want the tile back.
+
+Unlike the Store app, this build is not single-instance: each launch opens
+another window.
+
+If you would rather not hand over `calc.exe`, `-SkipIfeo` does everything else
+and needs no administrator at all.
+
 ## Requirements
 
 Windows 10 or 11, x86-64. No installer, no runtime, no DLLs to ship — GDI,
