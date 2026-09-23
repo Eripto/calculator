@@ -96,3 +96,36 @@ if (( SIZE > BUDGET_KB * 1024 )); then
   echo "    ERROR: over the ${BUDGET_KB} KB budget" >&2
   exit 1
 fi
+
+# The installer carries the calculator inside it as a resource, so it is built
+# from the Calculator.exe just produced and is not held to the budget above.
+echo "==> building installer"
+SETUP_OBJ="$OBJ/setup"
+mkdir -p "$SETUP_OBJ"
+cp "$OUT/Calculator.exe" "$SETUP_OBJ/Calculator.exe"
+
+SETUP_CXXFLAGS=(
+  -std=c++20 -Os -flto=1 -flto-partition=none -ffat-lto-objects -DNDEBUG -DUNICODE -D_UNICODE
+  -municode -fno-rtti -fno-exceptions
+  -ffunction-sections -fdata-sections
+  -fno-ident -fmerge-all-constants
+  -Wall -Wno-unknown-pragmas
+  -include "$ROOT/app/stdcxx_prelude.h"
+  -I"$ROOT/installer"
+)
+SETUP_OBJECTS=()
+for file in "$ROOT"/installer/*.cpp; do
+  name="$(basename "$file" .cpp).o"
+  "$CXX" "${SETUP_CXXFLAGS[@]}" -c "$file" -o "$SETUP_OBJ/$name"
+  SETUP_OBJECTS+=("$SETUP_OBJ/$name")
+done
+"$WINDRES" -I"$ROOT/res" -I"$ROOT/installer" -I"$SETUP_OBJ" "$ROOT/installer/setup.rc" -O coff -o "$SETUP_OBJ/setup.res.o"
+SETUP_OBJECTS+=("$SETUP_OBJ/setup.res.o")
+
+"$CXX" "${SETUP_OBJECTS[@]}" "${LDFLAGS[@]}" \
+  -lgdiplus -lmsimg32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -lcrypt32 -lmsvcrt \
+  -o "$OUT/CalculatorSetup.exe"
+"$STRIP" --strip-all "$OUT/CalculatorSetup.exe" 2>/dev/null || true
+
+SETUP_SIZE=$(stat -c %s "$OUT/CalculatorSetup.exe")
+printf '==> %s\n    %s bytes (%s KB)\n' "$OUT/CalculatorSetup.exe" "$SETUP_SIZE" "$((SETUP_SIZE / 1024))"

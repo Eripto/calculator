@@ -1,0 +1,40 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include <winresrc.h>
+
+101 ICON "calculator.ico"
+
+// The calculator itself, extracted on install. build.sh stages the freshly
+// built Calculator.exe where windres can find it.
+200 RCDATA "Calculator.exe"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "setup.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1, 0, 0, 0
+PRODUCTVERSION 1, 0, 0, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription",  "Calculator Setup"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "CalculatorSetup"
+            VALUE "LegalCopyright",   "Licensed under the MIT License."
+            VALUE "OriginalFilename", "CalculatorSetup.exe"
+            VALUE "ProductName",      "Calculator (compact build)"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

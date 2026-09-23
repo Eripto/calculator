@@ -318,16 +318,57 @@ above measures.
 
 ## Making it the system calculator
 
-`tools/Install-Calculator.ps1` puts this build where Windows looks for a
-calculator, and `-Action Uninstall` puts everything back. Double-clicking
-`tools/Install-Calculator.cmd` does the same thing and asks for administrator
-first.
+`build.sh` also produces `out/CalculatorSetup.exe`: one file, with the
+calculator inside it, that installs it and makes it the calculator Windows
+opens. It is a Windows 11-style wizard -- a welcome page, a page of options,
+a checklist that ticks off as it works, and a finish page -- that follows the
+light or dark theme and the accent colour, and is driven entirely by mouse or
+keyboard (Tab, Space, Enter, Esc).
+
+It installs for the current user, under
+`%LOCALAPPDATA%\Programs\CompactCalculator`, and lists itself in
+**Settings > Apps**, where Uninstall runs it again to put everything back.
+Running it a second time offers to change the options or remove it.
+
+It runs without administrator rights and asks for them only for the one step
+that needs them, redirecting `calc.exe`, from a separate elevated copy of
+itself that does that one thing and exits. Declining the prompt still leaves a
+working install: that option is reported as skipped on the finish page, and
+running Setup again can finish it. Its manifest says `asInvoker` explicitly,
+because Windows otherwise auto-elevates any unmanifested program with "setup"
+in its name.
+
+Uninstall only undoes a setting while it still points at this install. So if
+something else took one over in the meantime, it is left alone; and if
+something else owned one before, it gets that value back rather than a
+deleted key. Setup refuses to delete the files while `calc.exe` still points
+at them -- if the administrator prompt is declined during removal, Calculator
+stays installed and says why, rather than leaving `calc.exe` opening nothing.
+
+The wizard is about 100KB on top of the calculator it carries. That took
+keeping the C++ runtime's error reporting out, as the calculator itself does
+(`installer/SetupRuntime.cpp`), and spelling out the five COM GUIDs it uses
+instead of linking `libuuid`, which brings every GUID Windows defines along
+with them: together, 121KB.
+
+It also recognises an install made with the script below and takes it over.
+
+`CalculatorSetup.exe` is not code-signed, so the first time it runs from a
+download Windows SmartScreen will say it does not recognise it; **More info >
+Run anyway** proceeds.
+
+### The script
+
+`tools/Install-Calculator.ps1` does the same job from PowerShell, for anyone
+who would rather script it, and `-Action Uninstall` puts everything back.
+Double-clicking `tools/Install-Calculator.cmd` does the same thing and asks
+for administrator first.
 
     .\Install-Calculator.ps1                 # install
     .\Install-Calculator.ps1 -Action Status   # report, changes nothing
     .\Install-Calculator.ps1 -Action Uninstall
 
-Nothing it does overwrites a Windows file. `C:\Windows\System32\calc.exe` is
+Nothing either of them does overwrites a Windows file. `C:\Windows\System32\calc.exe` is
 owned by TrustedInstaller and covered by Windows Resource Protection, so
 replacing it means taking ownership of a system binary and then watching `sfc`
 or the next cumulative update restore it. The script uses the redirection
