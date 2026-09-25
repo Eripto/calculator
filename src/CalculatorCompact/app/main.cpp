@@ -14,7 +14,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
-#include <shellapi.h>
+#include <imm.h>
 #include <objidl.h>
 #include <gdiplus.h>
 
@@ -3691,19 +3691,6 @@ namespace
                 RECT caption{ field->rc.left, field->rc.top - Dp(18), field->rc.right, field->rc.top - Dp(2) };
                 DrawLabel(hdc, caption, kFieldLabels[i], 12, g_theme.secondaryText, false,
                           DT_SINGLELINE | DT_LEFT | DT_VCENTER);
-
-                Gdiplus::Pen border(ToGp(app.m_graphField == i ? g_theme.accent : g_theme.divider));
-                g.DrawRectangle(&border, Gdiplus::Rect(field->rc.left, field->rc.top,
-                                                       field->rc.right - field->rc.left - 1,
-                                                       field->rc.bottom - field->rc.top - 1));
-                std::wstring value = app.GraphFieldText(i);
-                if (app.m_graphField == i)
-                {
-                    value += L"|";
-                }
-                RECT text{ field->rc.left + Dp(8), field->rc.top, field->rc.right - Dp(8), field->rc.bottom };
-                DrawLabel(hdc, text, value, 14, g_theme.primaryText, false,
-                          DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             }
         }
         if (firstUnit != nullptr)
@@ -3713,14 +3700,47 @@ namespace
         if (thickness != nullptr)
         {
             section(L"Line thickness", thickness->rc.top - Dp(20));
-            // A sample of the width the curves are drawn at.
-            Gdiplus::Pen sample(ToGp(g_theme.primaryText), 1.0f + static_cast<float>(app.m_graphThickness));
-            const int centre = (thickness->rc.top + thickness->rc.bottom) / 2;
-            g.DrawLine(&sample, thickness->rc.left + Dp(10), centre, thickness->rc.right - Dp(40), centre);
         }
         if (firstTheme != nullptr)
         {
             section(L"Graph theme", firstTheme->rc.top - Dp(20));
+        }
+    }
+
+    // What sits inside the option controls: the four window fields' boxes and
+    // values, and the line-thickness sample. The controls themselves are
+    // buttons, whose hover and press fills are painted after the panel, so
+    // anything inside them has to come after those fills or a hover hides it.
+    void PaintGraphOptionControls(HDC hdc, CalcApp& app)
+    {
+        if (!app.m_graphOptionsOpen || app.m_graphEquationsView)
+        {
+            return;
+        }
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        for (const Btn& b : app.m_buttons)
+        {
+            if (b.action >= ACT_GRAPH_FIELD_BASE && b.action < ACT_GRAPH_FIELD_BASE + 4)
+            {
+                const int i = b.action - ACT_GRAPH_FIELD_BASE;
+                Gdiplus::Pen border(ToGp(app.m_graphField == i ? g_theme.accent : g_theme.divider));
+                g.DrawRectangle(&border, Gdiplus::Rect(b.rc.left, b.rc.top, b.rc.right - b.rc.left - 1, b.rc.bottom - b.rc.top - 1));
+                std::wstring value = app.GraphFieldText(i);
+                if (app.m_graphField == i)
+                {
+                    value += L"|";
+                }
+                RECT text{ b.rc.left + Dp(8), b.rc.top, b.rc.right - Dp(8), b.rc.bottom };
+                DrawLabel(hdc, text, value, 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+            }
+            else if (b.action == ACT_GRAPH_THICKNESS)
+            {
+                // A sample of the width the curves are drawn at.
+                Gdiplus::Pen sample(ToGp(g_theme.primaryText), 1.0f + static_cast<float>(app.m_graphThickness));
+                const int centre = (b.rc.top + b.rc.bottom) / 2;
+                g.DrawLine(&sample, b.rc.left + Dp(10), centre, b.rc.right - Dp(40), centre);
+            }
         }
     }
 
@@ -3932,23 +3952,24 @@ namespace
         int m_height = 0;
     };
 
-    // The window's double buffer, and one scratch layer shared by the two
-    // transitions that composite through AlphaBlend. They never overlap within
-    // a frame: the content layer is blended and finished with before the
-    // overlays are drawn.
-    // Hands back the pages an animation touched. The working set is what Task
-    // Manager reports as an app's memory, and a burst of compositing leaves a
-    // lot of it resident that nothing will read again. Pages fault back in on
-    // demand, so this changes the footprint and nothing else.
-    // Empties the working set and decommits the heap's free blocks.
+    // Hands the working set back to Windows -- which is what Task Manager's
+    // Memory column measures -- and decommits the heap's free blocks, so what
+    // goes is released outright where it can be, not just paged out.
     //
-    // Only worth doing when the window is minimised. Run on a short idle timer
-    // instead -- which is what this used to do -- it sets up a sawtooth: the
-    // trim drops the working set, the very next paint reallocates the back
-    // buffer and faults every page back in, and two seconds later it all
-    // happens again. Task Manager shows that as memory jumping about, and the
-    // page faults make the paint slower into the bargain. The average was no
-    // better than simply holding one buffer steady.
+    // It runs when the window is minimised, and once whenever the calculator
+    // goes quiet: kTrimAfterIdleMs after the last message or animation frame,
+    // and not again until something happens. Never on a repeating timer. An
+    // earlier version trimmed every two seconds and released the back buffer
+    // while it was at it; the next paint reallocated the buffer and faulted
+    // every page back in, and two seconds later it all happened again -- a
+    // figure that jumped up and down while nothing was happening. Nothing is
+    // released here and nothing repaints afterwards, so at rest the figure
+    // stays down, and the pages come back from RAM when the calculator is
+    // next used.
+    //
+    // A hard working-set limit would hold the figure down while it is in use
+    // too, but only by making Windows take pages away mid-paint and hand them
+    // straight back: the same memory, more CPU, and a figure that jitters.
     void TrimWorkingSet()
     {
         SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
@@ -3971,6 +3992,9 @@ namespace
             heapSetInformation(nullptr, 3 /* HeapOptimizeResources */, &optimize, sizeof(optimize));
         }
     }
+
+    // How long the calculator has to be quiet before TrimWorkingSet runs.
+    constexpr ULONGLONG kTrimAfterIdleMs = 1500;
 
     // Never composite more often than this, whatever DwmFlush does.
     constexpr ULONGLONG kMinFrameMs = 16; // 60fps; the compositor will not show more
@@ -4575,6 +4599,7 @@ namespace
         }
         else if (app.m_mode == Mode::Graphing)
         {
+            PaintGraphOptionControls(hdc, app);
             PaintGraphing(hdc, app);
         }
         else if (app.m_mode == Mode::Date)
@@ -6765,6 +6790,20 @@ namespace
         return 0;
     }
 
+    // shell32 is a large DLL, and every DLL a process loads adds private
+    // pages to it. The calculator needs exactly one of its functions, and only
+    // when Update is clicked, so it is loaded then rather than at startup.
+    void OpenWithShell(HWND owner, const wchar_t* file, const wchar_t* parameters)
+    {
+        using ShellExecuteFn = HINSTANCE(WINAPI*)(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT);
+        HMODULE shell = LoadLibraryExW(L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const auto shellExecute = shell ? reinterpret_cast<ShellExecuteFn>(GetProcAddress(shell, "ShellExecuteW")) : nullptr;
+        if (shellExecute != nullptr)
+        {
+            shellExecute(owner, L"open", file, parameters, nullptr, SW_SHOWNORMAL);
+        }
+    }
+
     DWORD WINAPI WaitForUpdateCheck(void* process)
     {
         WaitForSingleObject(static_cast<HANDLE>(process), 120000);
@@ -6837,7 +6876,7 @@ namespace
         wchar_t setup[MAX_PATH];
         if (SetupBeside(setup))
         {
-            ShellExecuteW(m_hwnd, L"open", setup, L"/downloadupdate", nullptr, SW_SHOWNORMAL);
+            OpenWithShell(m_hwnd, setup, L"/downloadupdate");
         }
         m_bannerHot = 0;
         m_bannerAnim.To(0.0f, kMotionNormalMs, EaseStandard);
@@ -6860,6 +6899,12 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 {
+    // The calculator takes keystrokes, never composed text, so the IME and the
+    // text-input stack Windows loads behind it for every window that takes
+    // focus have nothing to do here -- and they are not small. Digits typed
+    // with an East Asian IME switched on arrive as plain digits instead.
+    ImmDisableIME(static_cast<DWORD>(-1));
+
     // GDI+ normally spins up a background thread to watch for display changes.
     // This app redraws on WM_DISPLAYCHANGE and DPI changes anyway, so suppress
     // it and pump the notification hook ourselves: one fewer thread, and its
@@ -6924,9 +6969,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     MSG message{};
     bool running = true;
     bool wasAnimating = false;
+    bool trimPending = true; // startup counts as activity
+    ULONGLONG lastActivity = GetTickCount64();
     while (running)
     {
         const bool animating = g_app.AnimationsRunning();
+        if (animating)
+        {
+            lastActivity = GetTickCount64();
+            trimPending = true;
+        }
         if (wasAnimating && !animating)
         {
             // The scratch layer only exists for transitions, so let it go as
@@ -6940,12 +6992,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 
         if (!animating)
         {
+            // Idle: wait for the next message, but if a trim is due and the
+            // calculator stays quiet until then, do it first.
+            if (trimPending)
+            {
+                const ULONGLONG idle = GetTickCount64() - lastActivity;
+                const DWORD wait = idle >= kTrimAfterIdleMs ? 0 : static_cast<DWORD>(kTrimAfterIdleMs - idle);
+                if (MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT)
+                {
+                    TrimWorkingSet();
+                    trimPending = false;
+                    continue;
+                }
+            }
             if (GetMessageW(&message, nullptr, 0, 0) <= 0)
             {
                 break;
             }
             TranslateMessage(&message);
             DispatchMessageW(&message);
+            lastActivity = GetTickCount64();
+            trimPending = true;
             continue;
         }
 

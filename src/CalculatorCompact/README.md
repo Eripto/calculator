@@ -279,6 +279,30 @@ every page back in, and two seconds later it repeated. Task Manager showed that
 as memory jumping about, and the page faults made each paint slower. Holding
 one buffer steady costs 892KB and stays flat.
 
+What Task Manager shows is the *active private working set*: the private pages
+the process has touched recently and still holds, not what it has allocated.
+Pages stay in it after they stop being needed -- a page visited once while
+drawing Settings stays counted there until Windows reclaims it. So once
+the app has had 1.5 seconds with no input and nothing moving, the message loop
+hands its working set back once (`SetProcessWorkingSetSize(-1, -1)`, and the
+heap's free blocks decommitted). Nothing is freed or rebuilt, so the next paint
+doesn't fault everything back in and repaint again, which is what went wrong
+with the timer above; the trim is re-armed only by real input and fires at most
+once per idle spell. Sitting on any screen, the number then falls back to what
+is actually in use. While you click and type it rises and settles again.
+
+It's a trim at rest rather than a hard cap
+(`QUOTA_LIMITS_HARDWS_MAX_ENABLE`) because a 1MB ceiling is smaller than a
+single frame's worth of pages: every paint would push pages out and fault them
+straight back, trading a smaller number for stutter and CPU time.
+
+Two DLLs are no longer part of every run either. `shell32`, a large DLL whose
+private pages come with loading it, was imported only to start
+`Setup.exe` from the update banner; it is now loaded when that button is
+clicked. The input method editor, which would otherwise attach its per-thread
+state to the window, is switched off at startup -- the calculator takes keys,
+not composed text.
+
 Counted inside the app over an identical scripted session -- three cycles of
 Standard, Scientific, Programmer, Standard:
 

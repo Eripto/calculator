@@ -69,7 +69,7 @@ LDFLAGS=(
   -Wl,--gc-sections -Wl,--strip-all -Wl,--no-insert-timestamp -Wl,--disable-runtime-pseudo-reloc
 )
 
-LIBS=(-lgdiplus -lmsimg32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -lshell32 -lole32 -luuid -lmsvcrt)
+LIBS=(-lgdiplus -lmsimg32 -lgdi32 -luser32 -ldwmapi -ladvapi32 -limm32 -lole32 -luuid -lmsvcrt)
 
 echo "==> building engine ($ARCH)"
 SOURCES=()
