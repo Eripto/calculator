@@ -899,6 +899,10 @@ namespace
     // ------------------------------------------------------------- the app
 
     constexpr int kNavRowDip = 48;   // HamburgerHeight in App.xaml
+    // The update banner: a WinUI InfoBar, 48px high, with 4px around it.
+    constexpr int kBannerDip = 48;
+    constexpr int kBannerStripDip = kBannerDip + 8;
+    constexpr UINT WM_APP_UPDATE_CHECKED = WM_APP + 1; // Setup's daily check has finished
     constexpr int kTitleDip = 20;    // SubtitleTextBlockStyle
     constexpr int kNavPaneDip = 256; // SplitViewOpenPaneLength in App.xaml
     constexpr int kExprRowDip = 22;
@@ -1275,7 +1279,7 @@ namespace
         bool AnimationsRunning() const
         {
             return m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active() || m_menuAnim.Active() || m_contentAnim.Active()
-                || m_themeAnim.Active() || m_toastAnim.Active()
+                || m_themeAnim.Active() || m_toastAnim.Active() || m_bannerAnim.Active()
                 || m_pressAnim.Active() || m_hoverIn.Active() || m_hoverOut.Active();
         }
 
@@ -1304,7 +1308,7 @@ namespace
                 m_panelClosing = false;
                 Relayout();
             }
-            if (m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active())
+            if (m_navAnim.Active() || m_settingsAnim.Active() || m_panelAnim.Active() || m_bannerAnim.Active())
             {
                 Relayout();
             }
@@ -1503,7 +1507,7 @@ namespace
             }
             RECT rc{};
             GetClientRect(m_hwnd, &rc);
-            BuildLayout(rc.right - rc.left, rc.bottom - rc.top);
+            BuildLayout(rc.right - rc.left, (rc.bottom - rc.top) - BannerOffset());
             Invalidate();
         }
 
@@ -1550,6 +1554,48 @@ namespace
         Anim m_panelAnim;    // history / memory panel
         Anim m_themeAnim;    // outgoing theme, fading out over the new one
         Anim m_toastAnim;    // the confirmation over the plot, holding then fading
+        Anim m_bannerAnim;   // the update banner: 0 hidden, 1 fully down
+
+        // The update banner sits in a strip above the app. While it shows, the
+        // app lays out and paints in a window that much shorter, shifted down
+        // by it, and pointer input is shifted up to match -- so nothing in the
+        // app has to know the banner exists.
+        std::wstring m_updateVersion;
+        int m_bannerHot = 0;     // 1 the Update button, 2 the close button
+        int m_bannerPressed = 0;
+
+        int BannerOffset() const
+        {
+            return static_cast<int>(m_bannerAnim.Value() * static_cast<float>(Dp(kBannerStripDip)) + 0.5f);
+        }
+
+        // Window coordinates. The card slides down from above the top edge.
+        void BannerRects(int width, RECT& card, RECT& update, RECT& close) const
+        {
+            const int top = BannerOffset() - Dp(kBannerStripDip) + Dp(4);
+            card = RECT{ Dp(4), top, width - Dp(4), top + Dp(kBannerDip) };
+            const int centre = (card.top + card.bottom) / 2;
+            close = RECT{ card.right - Dp(8) - Dp(32), centre - Dp(16), card.right - Dp(8), centre + Dp(16) };
+            const int updateWidth = (std::max)(Dp(72), MeasureTextWidth(L"Update", 14, FW_NORMAL, 0) + Dp(24));
+            update = RECT{ close.left - Dp(4) - updateWidth, centre - Dp(16), close.left - Dp(4), centre + Dp(16) };
+        }
+
+        int BannerHit(POINT pt) const
+        {
+            if (BannerOffset() <= 0 || !m_hwnd)
+            {
+                return 0;
+            }
+            RECT client{};
+            GetClientRect(m_hwnd, &client);
+            RECT card{}, update{}, close{};
+            BannerRects(client.right, card, update, close);
+            return PtInRect(&update, pt) ? 1 : PtInRect(&close, pt) ? 2 : 0;
+        }
+
+        void RefreshUpdateBanner();
+        void UpdateFromBanner();
+        void DismissBanner();
         Anim m_menuAnim;     // dropdown flyout
         Anim m_contentAnim;  // mode content entering
         Anim m_pressAnim;    // pointer-down shrink on the pressed key
@@ -3077,7 +3123,11 @@ namespace
         rows.top += Dp(38);
         rows.bottom -= Dp(46);
 
-        HRGN clip = CreateRectRgn(rows.left, rows.top, rows.right, rows.bottom);
+        // Regions are in device units, so the viewport origin -- which is where
+        // the update banner moves the app to -- has to be added by hand.
+        POINT origin{};
+        GetViewportOrgEx(hdc, &origin);
+        HRGN clip = CreateRectRgn(rows.left + origin.x, rows.top + origin.y, rows.right + origin.x, rows.bottom + origin.y);
         SelectClipRgn(hdc, clip);
 
         if (app.m_panel == Panel::History)
@@ -3952,7 +4002,8 @@ namespace
     // takes an image, and the equations as text for anything that does not.
     bool CopyGraphToClipboard(CalcApp& app)
     {
-        const RECT plot = app.m_graphRect;
+        RECT plot = app.m_graphRect;
+        OffsetRect(&plot, 0, app.BannerOffset()); // back-buffer coordinates
         const int width = plot.right - plot.left;
         const int height = plot.bottom - plot.top;
         HDC source = g_backBuffer.Dc();
@@ -4792,6 +4843,86 @@ namespace
 
         PaintOverlays(hdc, width, height);
     }
+
+    // The update banner, as a WinUI InfoBar: the informational icon, the
+    // title, an action button and a close button, on a card in the strip
+    // above the app.
+    void PaintBanner(HDC hdc, int width, int strip)
+    {
+        CalcApp& app = g_app;
+        RECT band{ 0, 0, width, strip };
+        HBRUSH page = CreateSolidBrush(g_theme.page);
+        FillRect(hdc, &band, page);
+        DeleteObject(page);
+
+        RECT card{}, update{}, close{};
+        app.BannerRects(width, card, update, close);
+        SetBkMode(hdc, TRANSPARENT);
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+        FillRounded(g, card, Dp(4), g_theme.divider);
+        RECT inner = card;
+        InflateRect(&inner, -1, -1);
+        FillRounded(g, inner, Dp(4) - 1, g_theme.card);
+
+        // The informational badge: an accent disc with an "i" knocked out.
+        const int centre = (card.top + card.bottom) / 2;
+        const float cx = static_cast<float>(card.left + Dp(16) + Dp(8));
+        const float cy = static_cast<float>(centre);
+        const float r = static_cast<float>(Dp(8));
+        Gdiplus::SolidBrush disc(ToGp(g_theme.accent));
+        g.FillEllipse(&disc, cx - r, cy - r, r * 2, r * 2);
+        Gdiplus::SolidBrush mark(ToGp(g_theme.accentText));
+        const float stroke = static_cast<float>(Dp(15)) / 10.0f;
+        g.FillEllipse(&mark, cx - stroke * 0.65f, cy - r * 0.55f - stroke * 0.65f, stroke * 1.3f, stroke * 1.3f);
+        g.FillRectangle(&mark, cx - stroke / 2, cy - r * 0.15f, stroke, r * 0.7f);
+
+        // The title, and the version after it when there is room.
+        const int textLeft = card.left + Dp(16) + Dp(16) + Dp(12);
+        const int textRight = update.left - Dp(8);
+        const std::wstring_view title = L"Update available";
+        const int titleWidth = MeasureTextWidth(title, 14, FW_SEMIBOLD, 0);
+        RECT titleRect{ textLeft, card.top, textRight, card.bottom };
+        DrawLabel(hdc, titleRect, title, 14, g_theme.primaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
+                  FW_SEMIBOLD);
+        const int versionLeft = textLeft + titleWidth + Dp(8);
+        if (!app.m_updateVersion.empty() && versionLeft + MeasureTextWidth(app.m_updateVersion, 14, FW_NORMAL, 0) <= textRight)
+        {
+            RECT versionRect{ versionLeft, card.top, textRight, card.bottom };
+            DrawLabel(hdc, versionRect, app.m_updateVersion, 14, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+        }
+
+        // Update is the primary action, so it takes the accent, as Windows
+        // Update's own button does.
+        const bool updateHot = app.m_bannerHot == 1 && (app.m_bannerPressed == 0 || app.m_bannerPressed == 1);
+        const bool updatePressed = app.m_bannerPressed == 1 && app.m_bannerHot == 1;
+        FillRounded(g, update, Dp(4), updatePressed ? g_theme.accentPress : updateHot ? g_theme.accentHover : g_theme.accent);
+        DrawLabel(hdc, update, L"Update", 14, g_theme.accentText, false, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+        const bool closeHot = app.m_bannerHot == 2 && (app.m_bannerPressed == 0 || app.m_bannerPressed == 2);
+        if (closeHot)
+        {
+            FillRounded(g, close, Dp(4), app.m_bannerPressed == 2 ? g_theme.flatPress : g_theme.flatHover);
+        }
+        DrawVectorIcon(g, close, VIcon_Close, g_theme.primaryText, 12);
+    }
+
+    // The whole window: the update banner's strip, if it is showing, and the
+    // app drawn below it through a shifted viewport.
+    void PaintFrame(HDC hdc, int width, int height)
+    {
+        const int strip = (std::min)(g_app.BannerOffset(), height);
+        if (strip > 0)
+        {
+            PaintBanner(hdc, width, strip);
+        }
+        POINT previous{};
+        SetViewportOrgEx(hdc, 0, strip, &previous);
+        PaintApp(hdc, width, height - strip);
+        SetViewportOrgEx(hdc, previous.x, previous.y, nullptr);
+    }
 }
 
 namespace
@@ -4812,6 +4943,7 @@ namespace
 
         RECT client{};
         GetClientRect(m_hwnd, &client);
+        client.bottom -= BannerOffset(); // the app's own height, below the banner
 
         const int itemHeight = Dp(34);
         const int count = static_cast<int>(m_menuItemStorage.size());
@@ -4904,6 +5036,7 @@ namespace
 
         RECT client{};
         GetClientRect(m_hwnd, &client);
+        client.bottom -= BannerOffset(); // the app's own height, below the banner
 
         const int cell = Dp(34);
         const int width = cell * 7 + Dp(16);
@@ -6143,7 +6276,7 @@ namespace
             HDC memDC = g_backBuffer.Acquire(hdc, width, height);
             if (memDC != nullptr)
             {
-                PaintApp(memDC, width, height);
+                PaintFrame(memDC, width, height);
 
                 const float outgoing = app.m_themeAnim.Value();
                 if (outgoing > 0.004f && g_themeLayer.Matches(width, height))
@@ -6162,7 +6295,7 @@ namespace
             }
             else
             {
-                PaintApp(hdc, width, height);
+                PaintFrame(hdc, width, height);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -6173,6 +6306,16 @@ namespace
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd, 0 };
             TrackMouseEvent(&track);
+
+            // The update banner first; everything after this is in the app's
+            // own coordinates, which start below it.
+            const int bannerHot = app.BannerHit(pt);
+            if (bannerHot != app.m_bannerHot)
+            {
+                app.m_bannerHot = bannerHot;
+                app.Invalidate();
+            }
+            pt.y -= app.BannerOffset();
 
             if (app.m_graphDragging)
             {
@@ -6225,7 +6368,12 @@ namespace
             return 0;
         }
 
+        case WM_APP_UPDATE_CHECKED:
+            app.RefreshUpdateBanner();
+            return 0;
+
         case WM_MOUSELEAVE:
+            app.m_bannerHot = 0;
             app.m_hot = -1;
             app.m_hotMenu = -1;
             app.m_hotNav = -1;
@@ -6237,6 +6385,15 @@ namespace
         {
             SetFocus(hwnd);
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (const int hit = app.BannerHit(pt))
+            {
+                app.m_bannerPressed = hit;
+                app.m_bannerHot = hit;
+                SetCapture(hwnd);
+                app.Invalidate();
+                return 0;
+            }
+            pt.y -= app.BannerOffset();
 
             if (app.m_menuOpen)
             {
@@ -6301,6 +6458,29 @@ namespace
         case WM_LBUTTONUP:
         {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (app.m_bannerPressed != 0)
+            {
+                // A press that started on the banner ends there, wherever
+                // the pointer has gone, and only acts if it is still over
+                // the same button -- as any Windows button behaves.
+                const int pressed = app.m_bannerPressed;
+                app.m_bannerPressed = 0;
+                ReleaseCapture();
+                app.Invalidate();
+                if (app.BannerHit(pt) == pressed)
+                {
+                    if (pressed == 1)
+                    {
+                        app.UpdateFromBanner();
+                    }
+                    else
+                    {
+                        app.DismissBanner();
+                    }
+                }
+                return 0;
+            }
+            pt.y -= app.BannerOffset();
             if (app.m_graphDragging)
             {
                 app.m_graphDragging = false;
@@ -6512,53 +6692,169 @@ namespace
 
 namespace
 {
-    // A Setup.exe beside the calculator means Setup installed it, and Setup
-    // knows how to ask GitHub for a newer release. It is asked at most once a
-    // day, in its own process, so nothing here waits on the network; it exits
-    // without showing anything unless it has an update to offer. The switch
-    // for it is on that update page, and stored where Setup keeps its own.
-    void StartDailyUpdateCheck()
+    // ---------------------------------------------------------------- updates
+    //
+    // A Setup.exe beside the calculator means Setup installed it, and Setup is
+    // what talks to GitHub. Once a day it is started with /checkupdate: it
+    // asks for the latest release and records a newer version under the key
+    // below, or clears it, and exits without showing anything. The calculator
+    // waits for it on a thread of its own -- so nothing here ever waits on the
+    // network -- and then shows or hides the banner from what it recorded.
+    // Update on the banner hands over to "Setup.exe /downloadupdate".
+
+    constexpr wchar_t kStateKey[] = L"Software\\CompactCalculator";
+    constexpr ULONGLONG kDay = 24ull * 60 * 60 * 10000000; // FILETIME counts 100ns
+
+    bool SetupBeside(wchar_t (&path)[MAX_PATH])
     {
-        wchar_t path[MAX_PATH];
         const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
         wchar_t* slash = (length > 0 && length < MAX_PATH) ? wcsrchr(path, L'\\') : nullptr;
         if (slash == nullptr || (slash - path) + 11 >= MAX_PATH)
         {
-            return;
+            return false;
         }
         lstrcpyW(slash + 1, L"Setup.exe");
-        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
-        {
-            return;
-        }
+        return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+    }
 
-        constexpr wchar_t key[] = L"Software\\CompactCalculator";
-        DWORD enabled = 1;
-        DWORD size = sizeof(enabled);
-        RegGetValueW(HKEY_CURRENT_USER, key, L"UpdateChecks", RRF_RT_REG_DWORD, nullptr, &enabled, &size);
-        ULONGLONG last = 0;
-        size = sizeof(last);
-        RegGetValueW(HKEY_CURRENT_USER, key, L"LastUpdateCheck", RRF_RT_REG_QWORD, nullptr, &last, &size);
+    ULONGLONG NowTicks()
+    {
         FILETIME now{};
         GetSystemTimeAsFileTime(&now);
-        const ULONGLONG ticks = (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
-        constexpr ULONGLONG kDay = 24ull * 60 * 60 * 10000000; // FILETIME counts 100ns
-        if (enabled == 0 || (ticks >= last && ticks - last < kDay))
+        return (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    }
+
+    ULONGLONG ReadTicks(const wchar_t* name)
+    {
+        ULONGLONG ticks = 0;
+        DWORD size = sizeof(ticks);
+        RegGetValueW(HKEY_CURRENT_USER, kStateKey, name, RRF_RT_REG_QWORD, nullptr, &ticks, &size);
+        return ticks;
+    }
+
+    bool UpdateChecksOn()
+    {
+        DWORD enabled = 1;
+        DWORD size = sizeof(enabled);
+        RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateChecks", RRF_RT_REG_DWORD, nullptr, &enabled, &size);
+        return enabled != 0;
+    }
+
+    // Numeric, part by part, the same way Setup compares: 1.10 beats 1.9.
+    int CompareVersions(const wchar_t* a, const wchar_t* b)
+    {
+        for (int part = 0; part < 4; ++part)
+        {
+            unsigned long x = 0;
+            unsigned long y = 0;
+            while (*a >= L'0' && *a <= L'9')
+            {
+                x = x * 10 + static_cast<unsigned long>(*a++ - L'0');
+            }
+            while (*b >= L'0' && *b <= L'9')
+            {
+                y = y * 10 + static_cast<unsigned long>(*b++ - L'0');
+            }
+            if (x != y)
+            {
+                return x < y ? -1 : 1;
+            }
+            a += (*a == L'.') ? 1 : 0;
+            b += (*b == L'.') ? 1 : 0;
+        }
+        return 0;
+    }
+
+    DWORD WINAPI WaitForUpdateCheck(void* process)
+    {
+        WaitForSingleObject(static_cast<HANDLE>(process), 120000);
+        CloseHandle(static_cast<HANDLE>(process));
+        PostMessageW(g_app.m_hwnd, WM_APP_UPDATE_CHECKED, 0, 0);
+        return 0;
+    }
+
+    void StartDailyUpdateCheck()
+    {
+        wchar_t path[MAX_PATH];
+        const ULONGLONG now = NowTicks();
+        const ULONGLONG last = ReadTicks(L"LastUpdateCheck");
+        if (!SetupBeside(path) || !UpdateChecksOn() || (now >= last && now - last < kDay))
         {
             return;
         }
         // Stamped before starting, so a check that fails still waits a day.
-        RegSetKeyValueW(HKEY_CURRENT_USER, key, L"LastUpdateCheck", REG_QWORD, &ticks, sizeof(ticks));
+        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"LastUpdateCheck", REG_QWORD, &now, sizeof(now));
 
         wchar_t command[MAX_PATH + 32];
         wsprintfW(command, L"\"%s\" /checkupdate", path);
         STARTUPINFOW startup{ sizeof(startup) };
         PROCESS_INFORMATION process{};
-        if (CreateProcessW(path, command, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+        if (!CreateProcessW(path, command, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
         {
-            CloseHandle(process.hThread);
+            return;
+        }
+        CloseHandle(process.hThread);
+        HANDLE waiter = CreateThread(nullptr, 0, WaitForUpdateCheck, process.hProcess, 0, nullptr);
+        if (waiter != nullptr)
+        {
+            CloseHandle(waiter); // the thread owns the process handle now
+        }
+        else
+        {
             CloseHandle(process.hProcess);
         }
+    }
+
+    // Shows the banner if a check has found a newer version, unless it was
+    // closed within the last day; hides it otherwise.
+    void CalcApp::RefreshUpdateBanner()
+    {
+        wchar_t setup[MAX_PATH];
+        wchar_t version[32]{};
+        DWORD size = sizeof(version);
+        const ULONGLONG now = NowTicks();
+        const ULONGLONG dismissed = ReadTicks(L"UpdateDismissed");
+        const bool show = SetupBeside(setup) && UpdateChecksOn()
+            && RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateVersion", RRF_RT_REG_SZ, nullptr, version, &size) == ERROR_SUCCESS
+            && CompareVersions(version, L"" CALC_VERSION) > 0 && !(now >= dismissed && now - dismissed < kDay);
+        if (show)
+        {
+            m_updateVersion = version;
+            m_bannerAnim.To(1.0f, kMotionNormalMs);
+        }
+        else
+        {
+            m_bannerAnim.To(0.0f, kMotionNormalMs, EaseStandard);
+        }
+        EnsureFrameTimer();
+        Relayout();
+    }
+
+    void CalcApp::UpdateFromBanner()
+    {
+        // Setup takes it from here: it downloads and checks the release, then
+        // closes this window itself when it is ready to install.
+        wchar_t setup[MAX_PATH];
+        if (SetupBeside(setup))
+        {
+            ShellExecuteW(m_hwnd, L"open", setup, L"/downloadupdate", nullptr, SW_SHOWNORMAL);
+        }
+        m_bannerHot = 0;
+        m_bannerAnim.To(0.0f, kMotionNormalMs, EaseStandard);
+        EnsureFrameTimer();
+        Relayout();
+    }
+
+    void CalcApp::DismissBanner()
+    {
+        // Closed, not skipped: it comes back the next day if the update is
+        // still waiting.
+        const ULONGLONG now = NowTicks();
+        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateDismissed", REG_QWORD, &now, sizeof(now));
+        m_bannerHot = 0;
+        m_bannerAnim.To(0.0f, kMotionNormalMs, EaseStandard);
+        EnsureFrameTimer();
+        Relayout();
     }
 }
 
@@ -6618,6 +6914,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 
     ShowWindow(hwnd, showCommand);
     UpdateWindow(hwnd);
+    g_app.RefreshUpdateBanner(); // from what the last check found
     StartDailyUpdateCheck();
 
     // While something is animating, frames are paced against the compositor

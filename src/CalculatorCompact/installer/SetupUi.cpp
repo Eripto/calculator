@@ -56,10 +56,6 @@ namespace
         IdModeChange,
         IdModeRemove,
         IdLaunch,
-        IdUpdate,
-        IdNotNow,
-        IdSkipVersion,
-        IdAutoUpdate,
     };
 
     enum class Page
@@ -71,14 +67,14 @@ namespace
         Progress,
         Finished,
         NothingToRemove,
-        UpdateAvailable,
     };
 
     enum class LaunchMode
     {
         Normal,
         Uninstall, // from Settings > Apps
-        CheckUpdate, // the calculator's daily check, with an update found
+        CheckUpdate, // the calculator's daily check: no window, just a record
+        DownloadUpdate, // the Update button on the calculator's banner
         ApplyUpdate, // a downloaded Setup, installing over the top
     };
 
@@ -290,7 +286,7 @@ namespace
     class Wizard
     {
     public:
-        void Create(HINSTANCE instance, LaunchMode mode, const Setup::Release& release);
+        void Create(HINSTANCE instance, LaunchMode mode);
         LRESULT Handle(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     private:
@@ -313,7 +309,6 @@ namespace
         void LayoutProgress();
         void LayoutFinished();
         void LayoutNothingToRemove();
-        void LayoutUpdateAvailable();
 
         // painting
         void Paint(HDC hdc);
@@ -352,7 +347,6 @@ namespace
         bool m_modeRemove = false;
         bool m_launchAfter = true;
         LaunchMode m_mode = LaunchMode::Normal;
-        Setup::Release m_release;
 
         std::vector<Control> m_controls;
         std::vector<Label> m_labels;
@@ -496,11 +490,10 @@ namespace
 
     // ------------------------------------------------------------- create
 
-    void Wizard::Create(HINSTANCE instance, LaunchMode mode, const Setup::Release& release)
+    void Wizard::Create(HINSTANCE instance, LaunchMode mode)
     {
         m_instance = instance;
         m_mode = mode;
-        m_release = release;
         m_installed = Setup::QueryInstalled();
         if (m_installed.present)
         {
@@ -510,9 +503,9 @@ namespace
         {
             m_page = m_installed.present ? Page::Confirm : Page::NothingToRemove;
         }
-        else if (mode == LaunchMode::CheckUpdate)
+        else if (mode == LaunchMode::DownloadUpdate)
         {
-            m_page = Page::UpdateAvailable;
+            m_page = Page::Progress; // the run starts as soon as the window is up
         }
         else
         {
@@ -521,7 +514,7 @@ namespace
             {
                 m_mode = LaunchMode::Normal;
             }
-            m_page = m_installed.present ? Page::Maintenance : Page::Welcome;
+            m_page = m_mode == LaunchMode::ApplyUpdate ? Page::Progress : m_installed.present ? Page::Maintenance : Page::Welcome;
         }
 
         WNDCLASSEXW wc{ sizeof(wc) };
@@ -702,7 +695,6 @@ namespace
         case Page::Progress: LayoutProgress(); break;
         case Page::Finished: LayoutFinished(); break;
         case Page::NothingToRemove: LayoutNothingToRemove(); break;
-        case Page::UpdateAvailable: LayoutUpdateAvailable(); break;
         }
 
         m_focus = -1;
@@ -909,7 +901,13 @@ namespace
         std::wstring title;
         std::wstring body;
         GlyphKind badge = GlyphKind::Success;
-        if (removing)
+        const bool upToDate = m_plan && m_plan->downloading && m_plan->upToDate;
+        if (upToDate)
+        {
+            title = L"Calculator is up to date";
+            body = std::wstring(L"You have the latest version, ") + Setup::Version() + L".";
+        }
+        else if (removing)
         {
             if (m_plan->complete && clean)
             {
@@ -976,7 +974,7 @@ namespace
         y = AddLabel(left, y, width, title, FontRole::Subtitle, m_palette.text) + D(4);
         y = AddLabel(left, y, width, body, FontRole::Body, m_palette.secondary) + D(16);
 
-        for (size_t i = 0; m_plan && i < m_stepStates.size(); ++i)
+        for (size_t i = 0; m_plan && !upToDate && i < m_stepStates.size(); ++i)
         {
             const StepState state = m_stepStates[i];
             if (state != StepState::Skipped && state != StepState::Failed)
@@ -1014,33 +1012,6 @@ namespace
         y = AddLabel(left, y, width, L"Calculator isn't installed", FontRole::Subtitle, m_palette.text) + D(4);
         AddLabel(left, y, width, L"There's nothing to remove.", FontRole::Body, m_palette.secondary);
         AddFooter({ Control{ IdFinish, ControlType::AccentButton, {}, L"Close" } });
-    }
-
-    void Wizard::LayoutUpdateAvailable()
-    {
-        const int left = D(kMarginDip);
-        const int width = ClientWidth() - 2 * left;
-        int y = D(kMarginDip);
-
-        m_glyphs.push_back(Glyph{ RECT{ left, y, left + D(48), y + D(48) }, GlyphKind::AppIcon });
-        y += D(48) + D(20);
-        y = AddLabel(left, y, width, L"An update is available", FontRole::Subtitle, m_palette.text) + D(4);
-        y = AddLabel(left, y, width,
-                     L"Calculator " + m_release.version + L" is out on GitHub. You have " + Setup::Version() + L".", FontRole::Body,
-                     m_palette.secondary)
-            + D(16);
-        AddLabel(left, y, width, L"Updating closes Calculator if it's open, and keeps the options you chose when you installed it.",
-                 FontRole::Body, m_palette.text);
-
-        const int bottom = ClientHeight() - D(kFooterDip) - D(24);
-        Control automatic{ IdAutoUpdate, ControlType::CheckInline, RECT{ left, bottom - D(24), left + width, bottom },
-                           L"Check for updates automatically" };
-        automatic.checked = Setup::UpdateChecksEnabled();
-        m_controls.push_back(automatic);
-
-        AddFooter({ Control{ IdSkipVersion, ControlType::Button, {}, L"Skip this version" },
-                    Control{ IdNotNow, ControlType::Button, {}, L"Not now" },
-                    Control{ IdUpdate, ControlType::AccentButton, {}, L"Update" } });
     }
 
     void Wizard::SetPage(Page page)
@@ -1236,20 +1207,6 @@ namespace
         case IdModeChange: m_modeRemove = false; Relayout(); break;
         case IdModeRemove: m_modeRemove = true; Relayout(); break;
         case IdLaunch: m_launchAfter = !m_launchAfter; Relayout(); break;
-        case IdUpdate:
-            StartRun(Setup::PlanDownload(m_release, m_hwnd));
-            break;
-        case IdNotNow:
-            DestroyWindow(m_hwnd);
-            break;
-        case IdSkipVersion:
-            Setup::SkipVersion(m_release.version);
-            DestroyWindow(m_hwnd);
-            break;
-        case IdAutoUpdate:
-            Setup::SetUpdateChecksEnabled(!Setup::UpdateChecksEnabled());
-            Relayout();
-            break;
         }
     }
 
@@ -1587,15 +1544,16 @@ namespace
             Relayout();
             m_transitionStart = GetTickCount64();
             StartAnimation();
-            if (m_mode == LaunchMode::ApplyUpdate)
+            if (m_mode == LaunchMode::ApplyUpdate || m_mode == LaunchMode::DownloadUpdate)
             {
                 PostMessageW(hwnd, WM_APP_BEGIN_UPDATE, 0, 0);
             }
             return 0;
 
         case WM_APP_BEGIN_UPDATE:
-            // Straight to installing, with the options already chosen.
-            StartRun(Setup::PlanInstall(m_installed.options, hwnd));
+            // Straight into the work: fetching the update, or installing it
+            // with the options already chosen.
+            StartRun(m_mode == LaunchMode::DownloadUpdate ? Setup::PlanDownload(hwnd) : Setup::PlanInstall(m_installed.options, hwnd));
             return 0;
 
         case WM_DPICHANGED:
@@ -1819,10 +1777,11 @@ namespace
         LaunchMode mode = LaunchMode::Normal;
         if (argv != nullptr && argc >= 2)
         {
-            mode = lstrcmpiW(argv[1], L"/uninstall") == 0     ? LaunchMode::Uninstall
-                : lstrcmpiW(argv[1], L"/checkupdate") == 0    ? LaunchMode::CheckUpdate
-                : lstrcmpiW(argv[1], L"/update") == 0         ? LaunchMode::ApplyUpdate
-                                                              : LaunchMode::Normal;
+            mode = lstrcmpiW(argv[1], L"/uninstall") == 0         ? LaunchMode::Uninstall
+                : lstrcmpiW(argv[1], L"/checkupdate") == 0        ? LaunchMode::CheckUpdate
+                : lstrcmpiW(argv[1], L"/downloadupdate") == 0     ? LaunchMode::DownloadUpdate
+                : lstrcmpiW(argv[1], L"/update") == 0             ? LaunchMode::ApplyUpdate
+                                                                  : LaunchMode::Normal;
         }
         if (argv != nullptr)
         {
@@ -1858,22 +1817,28 @@ namespace
         ULONG_PTR gdiplusToken = 0;
         Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr);
 
-        // The daily check shows nothing at all unless there is something to
-        // offer: not installed by Setup, turned off, already up to date,
-        // offline, or a version the user chose to skip all end here.
-        Setup::Release release;
+        // The daily check never shows a window. It leaves its answer where the
+        // calculator's update banner reads it: a newer version recorded, or
+        // the record cleared. A check that could not reach GitHub leaves
+        // whatever the last one found.
         if (mode == LaunchMode::CheckUpdate)
         {
             const Setup::Installed installed = Setup::QueryInstalled();
-            if (!installed.present || installed.byScript || !Setup::UpdateChecksEnabled()
-                || Setup::CheckForUpdate(release) != Setup::CheckResult::UpdateAvailable || Setup::IsVersionSkipped(release.version))
+            Setup::Release release;
+            if (installed.present && !installed.byScript && Setup::UpdateChecksEnabled())
             {
-                CloseHandle(mutex);
-                return 0;
+                switch (Setup::CheckForUpdate(release))
+                {
+                case Setup::CheckResult::UpdateAvailable: Setup::RecordAvailableUpdate(release.version); break;
+                case Setup::CheckResult::UpToDate: Setup::ClearAvailableUpdate(); break;
+                case Setup::CheckResult::Failed: break;
+                }
             }
+            CloseHandle(mutex);
+            return 0;
         }
 
-        g_wizard.Create(instance, mode, release);
+        g_wizard.Create(instance, mode);
 
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0)

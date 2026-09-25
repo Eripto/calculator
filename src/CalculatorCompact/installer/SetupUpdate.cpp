@@ -507,30 +507,45 @@ namespace Setup
         return ReadDword(L"UpdateChecks", 1) != 0;
     }
 
-    void SetUpdateChecksEnabled(bool enabled)
+    void RecordAvailableUpdate(const std::wstring& version)
     {
-        const DWORD value = enabled ? 1 : 0;
-        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateChecks", REG_DWORD, &value, sizeof(value));
-    }
-
-    bool IsVersionSkipped(const std::wstring& version)
-    {
-        wchar_t skipped[64]{};
-        DWORD size = sizeof(skipped);
-        return RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"SkippedVersion", RRF_RT_REG_SZ, nullptr, skipped, &size) == ERROR_SUCCESS
-            && version == skipped;
-    }
-
-    void SkipVersion(const std::wstring& version)
-    {
-        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"SkippedVersion", REG_SZ, version.c_str(),
+        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateVersion", REG_SZ, version.c_str(),
                         static_cast<DWORD>((version.size() + 1) * sizeof(wchar_t)));
+    }
+
+    void ClearAvailableUpdate()
+    {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateVersion");
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kStateKey, L"UpdateDismissed");
     }
 
     namespace
     {
+        // Asked afresh rather than trusting what the daily check recorded:
+        // the download needs the release's URL, size and digest as they are
+        // now, and the answer may have changed since.
+        StepResult FindStep(Plan& plan)
+        {
+            switch (CheckForUpdate(plan.release))
+            {
+            case CheckResult::UpdateAvailable:
+                RecordAvailableUpdate(plan.release.version);
+                return {};
+            case CheckResult::UpToDate:
+                ClearAvailableUpdate();
+                plan.upToDate = true;
+                return { Outcome::Skipped, std::wstring() };
+            default:
+                return { Outcome::Failed, L"Setup couldn't reach GitHub. Check your connection and try again." };
+            }
+        }
+
         StepResult DownloadStep(Plan& plan)
         {
+            if (plan.upToDate)
+            {
+                return { Outcome::Skipped, std::wstring() };
+            }
             std::wstring error;
             if (!DownloadUpdate(plan.release, plan.downloadedPath, error))
             {
@@ -541,13 +556,13 @@ namespace Setup
         }
     }
 
-    std::unique_ptr<Plan> PlanDownload(const Release& release, HWND owner)
+    std::unique_ptr<Plan> PlanDownload(HWND owner)
     {
         auto plan = std::make_unique<Plan>();
         plan->owner = owner;
         plan->downloading = true;
-        plan->release = release;
-        plan->steps.push_back({ L"Downloading Calculator " + release.version, DownloadStep });
+        plan->steps.push_back({ L"Finding the latest release", FindStep });
+        plan->steps.push_back({ L"Downloading the update", DownloadStep });
         return plan;
     }
 }

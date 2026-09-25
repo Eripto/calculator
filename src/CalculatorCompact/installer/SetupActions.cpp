@@ -709,6 +709,9 @@ namespace Setup
 
             WriteString(HKEY_CURRENT_USER, kStateKey, L"InstallDir", plan.installDir);
             WriteString(HKEY_CURRENT_USER, kStateKey, L"Version", Version());
+            // Whatever the calculator's banner was offering is installed now,
+            // or superseded by what is.
+            ClearAvailableUpdate();
             SaveApplied(plan);
             return Done();
         }

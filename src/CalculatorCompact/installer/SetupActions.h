@@ -66,6 +66,7 @@ namespace Setup
 
         // Set only for an update download.
         bool downloading = false;
+        bool upToDate = false; // GitHub had nothing newer after all
         Release release;
         std::wstring downloadedPath;
     };
@@ -85,7 +86,7 @@ namespace Setup
 
     std::unique_ptr<Plan> PlanInstall(DWORD chosen, HWND owner);
     std::unique_ptr<Plan> PlanUninstall(HWND owner);
-    std::unique_ptr<Plan> PlanDownload(const Release& release, HWND owner);
+    std::unique_ptr<Plan> PlanDownload(HWND owner);
 
     // After the wizard closes: deletes a Setup.exe that could not delete itself.
     void ScheduleRemoval(const Plan& plan);

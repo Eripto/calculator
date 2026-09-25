@@ -349,7 +349,7 @@ It also recognises an install made with the script below and takes it over.
 
 ### Size
 
-`CalculatorSetup.exe` is about 218KB -- smaller than the 343KB calculator it
+`CalculatorSetup.exe` is about 218KB -- smaller than the 347KB calculator it
 installs. Most of that is the calculator travelling compressed: LZMA after
 the x86 branch filter, the pair `xz` uses for executables, gets it to 130KB.
 `tools/pack_payload.py` packs it at build time with Python's own `lzma`
@@ -384,23 +384,42 @@ leaving a pointer unpatched.
 None of this changes what the wizard looks like. All twelve of its screens,
 light and dark, captured before and after, are identical to the subpixel --
 apart from the size on the welcome page, which is measured from the
-calculator Setup carries and went from 342KB to 343KB when the calculator
-gained its daily update check.
+calculator Setup carries and has grown with it: 347KB now that it has the
+update banner.
 
 ### Updates
 
-Setup checks this repository's GitHub releases for newer versions. The
-installed calculator starts `Setup.exe /checkupdate` at most once a day, and
-that asks `api.github.com` for the latest release. If it is newer than the
-installed version and has a `CalculatorSetup.exe` attached, Setup offers it:
-**Update**, **Not now**, or **Skip this version**, with a checkbox to turn the
-daily check off. Otherwise it exits without showing anything -- including
-while the repository has no releases at all, which GitHub answers with a 404.
+Setup checks this repository's GitHub releases for newer versions, and the
+calculator shows what it finds in a banner above the title row: a WinUI
+InfoBar with the informational icon, **Update available** and the version,
+an **Update** button and a close button. It slides down when there is
+something to offer and back up when it is dealt with.
 
-**Update** downloads the new `CalculatorSetup.exe`, checks it, and runs it
-with `/update`, which reinstalls over the top with the options already chosen
-and then removes itself from the temp directory. Calculator is closed first if
-it is open.
+The calculator never talks to the network itself. At most once a day it
+starts `Setup.exe /checkupdate`, which asks `api.github.com` for the latest
+release, records a newer version under `HKCU\Software\CompactCalculator`
+(or clears the record), and exits without showing anything. The calculator
+waits for it on a thread of its own and then reads the record. Until the next
+check, it shows the banner straight from that record, without asking GitHub
+again. A repository with no releases answers 404, which reads as up to date.
+
+**Update** starts `Setup.exe /downloadupdate`, which opens straight onto its
+progress page, asks GitHub for the release again (its URL, size and digest
+as they are now), downloads the new `CalculatorSetup.exe`, checks it, and
+runs it with `/update`. That closes Calculator, reinstalls over the top with
+the options already chosen, and removes itself from the temp directory. If
+GitHub has nothing newer by then it says Calculator is up to date; if it
+cannot be reached it says so and changes nothing.
+
+The close button hides the banner for a day; if the update is still waiting
+after that, it comes back. The daily check can be turned off by setting
+`UpdateChecks` to 0 under the same key.
+
+While the banner shows, the app is laid out and painted as if the window
+were that much shorter, through a viewport shifted down by it, and pointer
+input is shifted up to match -- so none of the modes, panels or flyouts has
+to know the banner exists. The one exception is the history list's clip
+region, which is in device units and so adds the offset itself.
 
 The download is only trusted as far as it can be checked:
 
@@ -415,11 +434,17 @@ The download is only trusted as far as it can be checked:
 - Drafts and prereleases are never offered.
 
 This was tested end to end against a local stand-in for GitHub over real
-HTTPS -- the shipped binary, the real host names, a certificate from a test
-CA -- covering the 404, an update installed through to the new version, a
-wrong checksum, a truncated download, an asset from another repository or
-over plain HTTP, prereleases, older and equal versions, `1.0.10` against
-`1.0.0`, skipping a version, and turning the check off.
+HTTPS -- the shipped binaries, the real host names, a certificate from a test
+CA: the 404, the banner appearing after the daily check and from the record
+on the next launch without a second request, clicks landing on the right keys
+while the app is shifted, every mode, the history panel and the navigation
+pane under the banner, light and dark, the close button and a day's
+dismissal, **Update** carried through to an installed 9.9.9 that then shows
+no banner, "up to date" and an unreachable GitHub, a wrong checksum, a
+truncated download, an asset from another repository or over plain HTTP,
+prereleases, older and equal versions, and `1.0.10` against `1.0.0`. With
+no update pending, every mode is pixel-identical to the calculator without
+the banner code.
 
 To publish a release:
 

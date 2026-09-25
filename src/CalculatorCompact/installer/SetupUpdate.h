@@ -4,10 +4,12 @@
 // Updates from the repository's GitHub releases.
 //
 // The installed calculator starts "Setup.exe /checkupdate" at most once a day.
-// That asks GitHub for the latest release and, if it is newer than this Setup
-// and carries a CalculatorSetup.exe, offers it; otherwise it exits without
-// showing anything. Accepting downloads that Setup, checks it, and runs it
-// with /update, which reinstalls over the top with the options already chosen.
+// That asks GitHub for the latest release, records a newer version for the
+// calculator to show in its update banner (or clears it), and exits without
+// showing anything. The banner's Update button starts "Setup.exe
+// /downloadupdate", which downloads that release's CalculatorSetup.exe, checks
+// it, and runs it with /update, which reinstalls over the top with the
+// options already chosen.
 //
 // A repository with no releases answers 404, which reads as up to date.
 
@@ -48,7 +50,8 @@ namespace Setup
     int CompareVersions(const std::wstring& a, const std::wstring& b);
 
     bool UpdateChecksEnabled();
-    void SetUpdateChecksEnabled(bool enabled);
-    bool IsVersionSkipped(const std::wstring& version);
-    void SkipVersion(const std::wstring& version);
+
+    // What the calculator's banner reads: the newer version a check found.
+    void RecordAvailableUpdate(const std::wstring& version);
+    void ClearAvailableUpdate();
 }
