@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include "SetupActions.h"
+#include "SetupUpdate.h"
+#include "Unpack.h"
 
 #include <shellapi.h>
 #include <shlobj.h>
@@ -25,7 +27,6 @@ namespace Setup
         constexpr wchar_t kAppKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AppKey\\18";
         constexpr wchar_t kProtocolKey[] = L"Software\\Classes\\calculator";
         constexpr wchar_t kProtocolCommandKey[] = L"Software\\Classes\\calculator\\shell\\open\\command";
-        constexpr wchar_t kVersion[] = L"1.0.0";
         constexpr int kPayloadId = 200;
 
         // The calculator has shipped under both names; win32calc.exe is the
@@ -221,8 +222,11 @@ namespace Setup
             {
                 return true;
             }
-            static const std::wstring tail = L"\\CompactCalculator\\Calculator.exe";
-            return path.size() >= tail.size() && SamePath(path.substr(path.size() - tail.size()), tail);
+            // A literal, not a static std::wstring: this runs on both the UI and
+            // worker threads, and Setup is built without thread-safe statics.
+            const wchar_t tail[] = L"\\CompactCalculator\\Calculator.exe";
+            const size_t tailLength = ARRAYSIZE(tail) - 1;
+            return path.size() >= tailLength && SamePath(path.substr(path.size() - tailLength), tail);
         }
 
         // ------------------------------------------------------ processes
@@ -592,7 +596,7 @@ namespace Setup
                 return;
             }
             WriteString(HKEY_CURRENT_USER, kStateKey, L"InstallDir", dir);
-            WriteString(HKEY_CURRENT_USER, kStateKey, L"Version", kVersion);
+            WriteString(HKEY_CURRENT_USER, kStateKey, L"Version", Version());
             WriteDword(HKEY_CURRENT_USER, kStateKey, L"Options", OptionsFrom(script));
             if (!script.storeLocation.empty())
             {
@@ -629,35 +633,56 @@ namespace Setup
             WriteDword(HKEY_CURRENT_USER, kStateKey, L"Options", plan.applied);
         }
 
-        bool WritePayload(const std::wstring& target)
+        // The calculator travels LZMA-compressed (installer/Unpack.h), and
+        // is only written once it has unpacked and passed its checksum.
+        bool LoadPayload(const uint8_t*& data, size_t& size)
         {
             HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(kPayloadId), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
             HGLOBAL loaded = resource ? LoadResource(nullptr, resource) : nullptr;
-            const void* data = loaded ? LockResource(loaded) : nullptr;
-            const DWORD size = resource ? SizeofResource(nullptr, resource) : 0;
-            if (data == nullptr || size == 0)
+            data = loaded ? static_cast<const uint8_t*>(LockResource(loaded)) : nullptr;
+            size = resource ? SizeofResource(nullptr, resource) : 0;
+            return data != nullptr && size != 0;
+        }
+
+        bool WritePayload(const std::wstring& target)
+        {
+            const uint8_t* packed = nullptr;
+            size_t packedSize = 0;
+            if (!LoadPayload(packed, packedSize))
             {
                 return false;
             }
+            const size_t size = PayloadSize(packed, packedSize);
+            uint8_t* data = size ? static_cast<uint8_t*>(HeapAlloc(GetProcessHeap(), 0, size)) : nullptr;
+            if (data == nullptr)
+            {
+                return false;
+            }
+            bool ok = Unpack(packed, packedSize, data);
 
             // Written beside the target and moved over it, so a failure part
             // way never leaves a truncated Calculator.exe that calc.exe
             // already points at.
             const std::wstring staging = target + L".new";
-            HANDLE file = CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (file == INVALID_HANDLE_VALUE)
+            HANDLE file = ok ? CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)
+                             : INVALID_HANDLE_VALUE;
+            if (file != INVALID_HANDLE_VALUE)
             {
-                return false;
+                DWORD written = 0;
+                ok = WriteFile(file, data, static_cast<DWORD>(size), &written, nullptr) && written == size;
+                CloseHandle(file);
+                ok = ok && MoveFileExW(staging.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+                if (!ok)
+                {
+                    DeleteFileW(staging.c_str());
+                }
             }
-            DWORD written = 0;
-            const BOOL ok = WriteFile(file, data, size, &written, nullptr) && written == size;
-            CloseHandle(file);
-            if (!ok || !MoveFileExW(staging.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            else
             {
-                DeleteFileW(staging.c_str());
-                return false;
+                ok = false;
             }
-            return true;
+            HeapFree(GetProcessHeap(), 0, data);
+            return ok;
         }
 
         StepResult CopyFiles(Plan& plan)
@@ -683,13 +708,13 @@ namespace Setup
             }
 
             WriteString(HKEY_CURRENT_USER, kStateKey, L"InstallDir", plan.installDir);
-            WriteString(HKEY_CURRENT_USER, kStateKey, L"Version", kVersion);
+            WriteString(HKEY_CURRENT_USER, kStateKey, L"Version", Version());
             SaveApplied(plan);
             return Done();
         }
 
         // Runs "/ifeo <verb>" elevated, or in-process when already elevated.
-        StepResult RunIfeo(Plan& plan, const wchar_t* verb, HWND owner)
+        StepResult RunIfeo(Plan& plan, const wchar_t* verb)
         {
             DWORD code = 1;
             if (IsElevated())
@@ -702,7 +727,7 @@ namespace Setup
                 const std::wstring parameters = std::wstring(L"/ifeo ") + verb + L" \"" + plan.targetExe + L"\"";
                 SHELLEXECUTEINFOW info{ sizeof(info) };
                 info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
-                info.hwnd = owner;
+                info.hwnd = plan.owner;
                 info.lpVerb = L"runas";
                 info.lpFile = self.c_str();
                 info.lpParameters = parameters.c_str();
@@ -729,9 +754,9 @@ namespace Setup
             return Done();
         }
 
-        StepResult ApplyRedirect(Plan& plan, HWND owner)
+        StepResult ApplyRedirect(Plan& plan)
         {
-            StepResult result = RunIfeo(plan, L"apply", owner);
+            StepResult result = RunIfeo(plan, L"apply");
             if (result.outcome == Outcome::Done)
             {
                 plan.applied |= OptionRedirectCalc;
@@ -744,9 +769,9 @@ namespace Setup
             return result;
         }
 
-        StepResult RestoreRedirect(Plan& plan, HWND owner)
+        StepResult RestoreRedirect(Plan& plan)
         {
-            StepResult result = RunIfeo(plan, L"restore", owner);
+            StepResult result = RunIfeo(plan, L"restore");
             if (result.outcome == Outcome::Done)
             {
                 plan.applied &= ~OptionRedirectCalc;
@@ -950,7 +975,7 @@ namespace Setup
             const DWORD sizeKb = static_cast<DWORD>((FileBytes(plan.targetExe) + FileBytes(setupExe) + 1023) / 1024);
             bool ok = true;
             ok &= WriteString(HKEY_CURRENT_USER, key, L"DisplayName", L"Calculator (compact build)");
-            ok &= WriteString(HKEY_CURRENT_USER, key, L"DisplayVersion", kVersion);
+            ok &= WriteString(HKEY_CURRENT_USER, key, L"DisplayVersion", Version());
             ok &= WriteString(HKEY_CURRENT_USER, key, L"DisplayIcon", plan.targetExe + L",0");
             ok &= WriteString(HKEY_CURRENT_USER, key, L"InstallLocation", plan.installDir);
             ok &= WriteString(HKEY_CURRENT_USER, key, L"UninstallString", L"\"" + setupExe + L"\" /uninstall");
@@ -1035,8 +1060,10 @@ namespace Setup
 
     unsigned long long PayloadBytes()
     {
-        HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(kPayloadId), MAKEINTRESOURCEW(10));
-        return resource ? SizeofResource(nullptr, resource) : 0;
+        // The size it will have once installed, not the size it travels at.
+        const uint8_t* packed = nullptr;
+        size_t packedSize = 0;
+        return LoadPayload(packed, packedSize) ? PayloadSize(packed, packedSize) : 0;
     }
 
     std::unique_ptr<Plan> PlanInstall(DWORD chosen, HWND owner)
@@ -1049,12 +1076,13 @@ namespace Setup
 
         auto plan = std::make_unique<Plan>();
         Plan* p = plan.get();
+        p->owner = owner;
         p->installDir = previous.present ? previous.dir : DefaultInstallDir();
         p->targetExe = p->installDir + L"\\Calculator.exe";
         p->applied = previous.present ? previous.options : 0;
 
         auto& steps = p->steps;
-        steps.push_back({ L"Copying Calculator", [p] { return CopyFiles(*p); } });
+        steps.push_back({ L"Copying Calculator", CopyFiles });
 
         // Each option is either applied, or -- when it was on before and has
         // now been turned off -- undone, so changing options is a re-run.
@@ -1063,18 +1091,14 @@ namespace Setup
             DWORD bit;
             const wchar_t* applyTitle;
             const wchar_t* restoreTitle;
-            std::function<StepResult()> apply;
-            std::function<StepResult()> restore;
+            StepResult (*apply)(Plan&);
+            StepResult (*restore)(Plan&);
         };
-        const Choice choices[] = {
-            { OptionRedirectCalc, L"Opening this calculator from calc.exe", L"Giving calc.exe back to Windows",
-              [p, owner] { return ApplyRedirect(*p, owner); }, [p, owner] { return RestoreRedirect(*p, owner); } },
-            { OptionCalculatorKey, L"Setting up the Calculator key", L"Restoring the Calculator key",
-              [p] { return ApplyCalculatorKey(*p); }, [p] { return RestoreCalculatorKey(*p); } },
-            { OptionStartMenu, L"Adding Calculator to the Start menu", L"Removing the Start menu entry",
-              [p] { return ApplyStartMenu(*p); }, [p] { return RestoreStartMenu(*p); } },
-            { OptionReplaceStore, L"Replacing the Store Calculator", L"Bringing back the Store Calculator",
-              [p] { return ApplyReplaceStore(*p); }, [p] { return RestoreStore(*p); } },
+        static constexpr Choice choices[] = {
+            { OptionRedirectCalc, L"Opening this calculator from calc.exe", L"Giving calc.exe back to Windows", ApplyRedirect, RestoreRedirect },
+            { OptionCalculatorKey, L"Setting up the Calculator key", L"Restoring the Calculator key", ApplyCalculatorKey, RestoreCalculatorKey },
+            { OptionStartMenu, L"Adding Calculator to the Start menu", L"Removing the Start menu entry", ApplyStartMenu, RestoreStartMenu },
+            { OptionReplaceStore, L"Replacing the Store Calculator", L"Bringing back the Store Calculator", ApplyReplaceStore, RestoreStore },
         };
         for (const Choice& choice : choices)
         {
@@ -1088,7 +1112,7 @@ namespace Setup
             }
         }
 
-        steps.push_back({ L"Adding Calculator to Settings > Apps", [p] { return RegisterApp(*p); } });
+        steps.push_back({ L"Adding Calculator to Settings > Apps", RegisterApp });
         return plan;
     }
 
@@ -1102,6 +1126,7 @@ namespace Setup
 
         auto plan = std::make_unique<Plan>();
         Plan* p = plan.get();
+        p->owner = owner;
         p->removing = true;
         p->installDir = previous.present ? previous.dir : DefaultInstallDir();
         p->targetExe = p->installDir + L"\\Calculator.exe";
@@ -1110,36 +1135,36 @@ namespace Setup
         auto& steps = p->steps;
         if (p->applied & OptionRedirectCalc)
         {
-            steps.push_back({ L"Giving calc.exe back to Windows", [p, owner] { return RestoreRedirect(*p, owner); } });
+            steps.push_back({ L"Giving calc.exe back to Windows", RestoreRedirect });
         }
         if (p->applied & OptionCalculatorKey)
         {
-            steps.push_back({ L"Restoring the Calculator key", [p] { return RestoreCalculatorKey(*p); } });
+            steps.push_back({ L"Restoring the Calculator key", RestoreCalculatorKey });
         }
         if (p->applied & OptionStartMenu)
         {
-            steps.push_back({ L"Removing the Start menu entry", [p] { return RestoreStartMenu(*p); } });
+            steps.push_back({ L"Removing the Start menu entry", RestoreStartMenu });
         }
         if (p->applied & OptionReplaceStore)
         {
-            steps.push_back({ L"Bringing back the Store Calculator", [p] { return RestoreStore(*p); } });
+            steps.push_back({ L"Bringing back the Store Calculator", RestoreStore });
         }
-        steps.push_back({ L"Removing Calculator's files", [p] { return RemoveFiles(*p); } });
+        steps.push_back({ L"Removing Calculator's files", RemoveFiles });
         return plan;
     }
 
-    void ScheduleRemoval(const Plan& plan)
+    void ScheduleDeletion(const std::wstring& file, const std::wstring& directory)
     {
-        if (!plan.removeSelfOnExit)
-        {
-            return;
-        }
         // A running image cannot delete itself, so a hidden cmd.exe waits for
-        // this process to go and then removes the file and the directory.
-        const std::wstring setupExe = plan.installDir + L"\\Setup.exe";
+        // this process to go and then removes the file, and the directory if
+        // there is one and it is now empty.
         std::wstring command = L"\"" + SystemDirectory() + L"\\cmd.exe\" /d /s /c \""
-            L"for /l %i in (1,1,30) do (if exist \"" + setupExe + L"\" (del /f /q \"" + setupExe + L"\" >nul 2>&1 & ping -n 2 127.0.0.1 >nul))"
-            L" & rmdir \"" + plan.installDir + L"\" >nul 2>&1\"";
+            L"for /l %i in (1,1,30) do (if exist \"" + file + L"\" (del /f /q \"" + file + L"\" >nul 2>&1 & ping -n 2 127.0.0.1 >nul))";
+        if (!directory.empty())
+        {
+            command += L" & rmdir \"" + directory + L"\" >nul 2>&1";
+        }
+        command += L"\"";
         const std::wstring workingDirectory = SystemDirectory();
         STARTUPINFOW startup{ sizeof(startup) };
         startup.dwFlags = STARTF_USESHOWWINDOW;
@@ -1152,9 +1177,22 @@ namespace Setup
         }
     }
 
-    bool Launch(const std::wstring& exe)
+    void ScheduleRemoval(const Plan& plan)
     {
-        return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+        if (plan.removeSelfOnExit)
+        {
+            ScheduleDeletion(plan.installDir + L"\\Setup.exe", plan.installDir);
+        }
+    }
+
+    bool Launch(const std::wstring& exe, const wchar_t* parameters)
+    {
+        return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", exe.c_str(), parameters, nullptr, SW_SHOWNORMAL)) > 32;
+    }
+
+    std::wstring ThisExe()
+    {
+        return ModulePath();
     }
 
     int RunElevatedIfeo(const std::wstring& verb, const std::wstring& target)

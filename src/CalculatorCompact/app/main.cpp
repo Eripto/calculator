@@ -10,6 +10,7 @@
 // packaged-app machinery are traded for direct GDI/GDI+ drawing, which is what
 // keeps the binary small.
 
+#include "version.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>
@@ -4333,7 +4334,7 @@ namespace
             if (b.style == Style::Card && b.action == ACT_ABOUT_EXPAND)
             {
                 RECT version{ b.rc.left + Dp(52), b.rc.top + Dp(51), b.rc.right - Dp(44), b.rc.top + Dp(71) };
-                DrawLabel(hdc, version, L"1.0.0.0", 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+                DrawLabel(hdc, version, L"" CALC_VERSION_FULL, 12, g_theme.secondaryText, false, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
             }
         }
 
@@ -6509,6 +6510,58 @@ namespace
     }
 }
 
+namespace
+{
+    // A Setup.exe beside the calculator means Setup installed it, and Setup
+    // knows how to ask GitHub for a newer release. It is asked at most once a
+    // day, in its own process, so nothing here waits on the network; it exits
+    // without showing anything unless it has an update to offer. The switch
+    // for it is on that update page, and stored where Setup keeps its own.
+    void StartDailyUpdateCheck()
+    {
+        wchar_t path[MAX_PATH];
+        const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+        wchar_t* slash = (length > 0 && length < MAX_PATH) ? wcsrchr(path, L'\\') : nullptr;
+        if (slash == nullptr || (slash - path) + 11 >= MAX_PATH)
+        {
+            return;
+        }
+        lstrcpyW(slash + 1, L"Setup.exe");
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
+        {
+            return;
+        }
+
+        constexpr wchar_t key[] = L"Software\\CompactCalculator";
+        DWORD enabled = 1;
+        DWORD size = sizeof(enabled);
+        RegGetValueW(HKEY_CURRENT_USER, key, L"UpdateChecks", RRF_RT_REG_DWORD, nullptr, &enabled, &size);
+        ULONGLONG last = 0;
+        size = sizeof(last);
+        RegGetValueW(HKEY_CURRENT_USER, key, L"LastUpdateCheck", RRF_RT_REG_QWORD, nullptr, &last, &size);
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        const ULONGLONG ticks = (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+        constexpr ULONGLONG kDay = 24ull * 60 * 60 * 10000000; // FILETIME counts 100ns
+        if (enabled == 0 || (ticks >= last && ticks - last < kDay))
+        {
+            return;
+        }
+        // Stamped before starting, so a check that fails still waits a day.
+        RegSetKeyValueW(HKEY_CURRENT_USER, key, L"LastUpdateCheck", REG_QWORD, &ticks, sizeof(ticks));
+
+        wchar_t command[MAX_PATH + 32];
+        wsprintfW(command, L"\"%s\" /checkupdate", path);
+        STARTUPINFOW startup{ sizeof(startup) };
+        PROCESS_INFORMATION process{};
+        if (CreateProcessW(path, command, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+        {
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 {
     // GDI+ normally spins up a background thread to watch for display changes.
@@ -6565,6 +6618,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 
     ShowWindow(hwnd, showCommand);
     UpdateWindow(hwnd);
+    StartDailyUpdateCheck();
 
     // While something is animating, frames are paced against the compositor
     // rather than by WM_TIMER, whose 15.6ms granularity, low priority and

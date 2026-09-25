@@ -11,7 +11,8 @@
 
 #include <windows.h>
 
-#include <functional>
+#include "SetupUpdate.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,23 +42,32 @@ namespace Setup
         std::wstring note; // shown to the user when the step did not simply succeed
     };
 
+    struct Plan;
+
+    // A plain function pointer rather than std::function: every step works on
+    // the plan alone, and the type erasure cost a few KB for nothing.
     struct Step
     {
         std::wstring title;
-        std::function<StepResult()> run;
+        StepResult (*run)(Plan& plan);
     };
 
-    // A run of steps and the state they share. The steps capture a pointer to
-    // the plan that owns them, so it has to outlive the run.
+    // A run of steps and the state they share.
     struct Plan
     {
         std::vector<Step> steps;
+        HWND owner = nullptr; // parent for the administrator prompt
         std::wstring installDir;
         std::wstring targetExe;
         DWORD applied = 0;
         bool removing = false;
         bool complete = false; // an uninstall that left nothing behind
         bool removeSelfOnExit = false; // Setup.exe is running from the directory it removed
+
+        // Set only for an update download.
+        bool downloading = false;
+        Release release;
+        std::wstring downloadedPath;
     };
 
     struct Installed
@@ -75,10 +85,13 @@ namespace Setup
 
     std::unique_ptr<Plan> PlanInstall(DWORD chosen, HWND owner);
     std::unique_ptr<Plan> PlanUninstall(HWND owner);
+    std::unique_ptr<Plan> PlanDownload(const Release& release, HWND owner);
 
     // After the wizard closes: deletes a Setup.exe that could not delete itself.
     void ScheduleRemoval(const Plan& plan);
-    bool Launch(const std::wstring& exe);
+    void ScheduleDeletion(const std::wstring& file, const std::wstring& directory);
+    bool Launch(const std::wstring& exe, const wchar_t* parameters = nullptr);
+    std::wstring ThisExe();
 
     // The only part that runs elevated: Setup.exe /ifeo apply|restore "<exe>".
     int RunElevatedIfeo(const std::wstring& verb, const std::wstring& target);

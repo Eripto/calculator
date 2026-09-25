@@ -36,6 +36,7 @@ namespace
     constexpr UINT WM_APP_STEP_BEGIN = WM_APP + 1;
     constexpr UINT WM_APP_STEP_END = WM_APP + 2;
     constexpr UINT WM_APP_RUN_DONE = WM_APP + 3;
+    constexpr UINT WM_APP_BEGIN_UPDATE = WM_APP + 4;
     constexpr UINT_PTR kAnimationTimer = 1;
     constexpr UINT_PTR kFinishTimer = 2;
 
@@ -55,6 +56,10 @@ namespace
         IdModeChange,
         IdModeRemove,
         IdLaunch,
+        IdUpdate,
+        IdNotNow,
+        IdSkipVersion,
+        IdAutoUpdate,
     };
 
     enum class Page
@@ -66,6 +71,15 @@ namespace
         Progress,
         Finished,
         NothingToRemove,
+        UpdateAvailable,
+    };
+
+    enum class LaunchMode
+    {
+        Normal,
+        Uninstall, // from Settings > Apps
+        CheckUpdate, // the calculator's daily check, with an update found
+        ApplyUpdate, // a downloaded Setup, installing over the top
     };
 
     enum class ControlType
@@ -276,7 +290,7 @@ namespace
     class Wizard
     {
     public:
-        void Create(HINSTANCE instance, bool uninstall);
+        void Create(HINSTANCE instance, LaunchMode mode, const Setup::Release& release);
         LRESULT Handle(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     private:
@@ -299,6 +313,7 @@ namespace
         void LayoutProgress();
         void LayoutFinished();
         void LayoutNothingToRemove();
+        void LayoutUpdateAvailable();
 
         // painting
         void Paint(HDC hdc);
@@ -336,6 +351,8 @@ namespace
         DWORD m_options = Setup::OptionDefaults;
         bool m_modeRemove = false;
         bool m_launchAfter = true;
+        LaunchMode m_mode = LaunchMode::Normal;
+        Setup::Release m_release;
 
         std::vector<Control> m_controls;
         std::vector<Label> m_labels;
@@ -479,20 +496,31 @@ namespace
 
     // ------------------------------------------------------------- create
 
-    void Wizard::Create(HINSTANCE instance, bool uninstall)
+    void Wizard::Create(HINSTANCE instance, LaunchMode mode, const Setup::Release& release)
     {
         m_instance = instance;
+        m_mode = mode;
+        m_release = release;
         m_installed = Setup::QueryInstalled();
         if (m_installed.present)
         {
             m_options = m_installed.options;
         }
-        if (uninstall)
+        if (mode == LaunchMode::Uninstall)
         {
             m_page = m_installed.present ? Page::Confirm : Page::NothingToRemove;
         }
+        else if (mode == LaunchMode::CheckUpdate)
+        {
+            m_page = Page::UpdateAvailable;
+        }
         else
         {
+            // An update with nothing installed to update is a fresh install.
+            if (mode == LaunchMode::ApplyUpdate && !m_installed.present)
+            {
+                m_mode = LaunchMode::Normal;
+            }
             m_page = m_installed.present ? Page::Maintenance : Page::Welcome;
         }
 
@@ -597,18 +625,25 @@ namespace
     void Wizard::AddFooter(std::initializer_list<Control> buttons)
     {
         const int height = D(kButtonHeightDip);
-        const int width = D(kButtonWidthDip);
         const int gap = D(8);
         const int top = ClientHeight() - D(kFooterDip) + (D(kFooterDip) - height) / 2;
         int right = ClientWidth() - D(24);
         std::vector<Control> ordered(buttons);
+        HDC hdc = GetDC(m_hwnd);
+        HGDIOBJ previous = SelectObject(hdc, m_fonts[static_cast<int>(FontRole::Body)]);
         for (auto it = ordered.rbegin(); it != ordered.rend(); ++it)
         {
             Control control = *it;
+            // The standard width, unless the label needs more than it has.
+            SIZE text{};
+            GetTextExtentPoint32W(hdc, control.text.c_str(), static_cast<int>(control.text.size()), &text);
+            const int width = (std::max)(D(kButtonWidthDip), static_cast<int>(text.cx) + 2 * D(12));
             control.rc = RECT{ right - width, top, right, top + height };
             right -= width + gap;
             m_controls.push_back(control);
         }
+        SelectObject(hdc, previous);
+        ReleaseDC(m_hwnd, hdc);
         // Tab order should run left to right, as the buttons read.
         std::reverse(m_controls.end() - static_cast<std::ptrdiff_t>(ordered.size()), m_controls.end());
     }
@@ -667,6 +702,7 @@ namespace
         case Page::Progress: LayoutProgress(); break;
         case Page::Finished: LayoutFinished(); break;
         case Page::NothingToRemove: LayoutNothingToRemove(); break;
+        case Page::UpdateAvailable: LayoutUpdateAvailable(); break;
         }
 
         m_focus = -1;
@@ -814,7 +850,11 @@ namespace
         int y = D(kMarginDip);
 
         const bool removing = m_plan && m_plan->removing;
-        y = AddLabel(left, y, width, removing ? L"Removing Calculator" : L"Installing Calculator", FontRole::Subtitle, m_palette.text) + D(4);
+        const wchar_t* heading = removing                          ? L"Removing Calculator"
+            : (m_plan && m_plan->downloading)                       ? L"Downloading the update"
+            : m_mode == LaunchMode::ApplyUpdate                     ? L"Updating Calculator"
+                                                                    : L"Installing Calculator";
+        y = AddLabel(left, y, width, heading, FontRole::Subtitle, m_palette.text) + D(4);
 
         std::wstring status = L"Getting ready…";
         for (size_t i = 0; m_plan && i < m_stepStates.size(); ++i)
@@ -889,11 +929,24 @@ namespace
                 badge = GlyphKind::Critical;
             }
         }
+        else if (m_plan && m_plan->downloading)
+        {
+            // Reached only when the download failed; a good one hands over to
+            // the Setup it downloaded instead of finishing here.
+            title = L"The update couldn't be downloaded";
+            body = L"Calculator hasn't been changed. Here's what went wrong:";
+            badge = GlyphKind::Critical;
+        }
         else if (!m_plan || !copied)
         {
             title = L"Calculator couldn't be installed";
             body = L"Nothing was changed. Here's what went wrong:";
             badge = GlyphKind::Critical;
+        }
+        else if (clean && m_mode == LaunchMode::ApplyUpdate)
+        {
+            title = L"Calculator has been updated";
+            body = std::wstring(L"You now have version ") + Setup::Version() + L".";
         }
         else if (clean)
         {
@@ -963,6 +1016,33 @@ namespace
         AddFooter({ Control{ IdFinish, ControlType::AccentButton, {}, L"Close" } });
     }
 
+    void Wizard::LayoutUpdateAvailable()
+    {
+        const int left = D(kMarginDip);
+        const int width = ClientWidth() - 2 * left;
+        int y = D(kMarginDip);
+
+        m_glyphs.push_back(Glyph{ RECT{ left, y, left + D(48), y + D(48) }, GlyphKind::AppIcon });
+        y += D(48) + D(20);
+        y = AddLabel(left, y, width, L"An update is available", FontRole::Subtitle, m_palette.text) + D(4);
+        y = AddLabel(left, y, width,
+                     L"Calculator " + m_release.version + L" is out on GitHub. You have " + Setup::Version() + L".", FontRole::Body,
+                     m_palette.secondary)
+            + D(16);
+        AddLabel(left, y, width, L"Updating closes Calculator if it's open, and keeps the options you chose when you installed it.",
+                 FontRole::Body, m_palette.text);
+
+        const int bottom = ClientHeight() - D(kFooterDip) - D(24);
+        Control automatic{ IdAutoUpdate, ControlType::CheckInline, RECT{ left, bottom - D(24), left + width, bottom },
+                           L"Check for updates automatically" };
+        automatic.checked = Setup::UpdateChecksEnabled();
+        m_controls.push_back(automatic);
+
+        AddFooter({ Control{ IdSkipVersion, ControlType::Button, {}, L"Skip this version" },
+                    Control{ IdNotNow, ControlType::Button, {}, L"Not now" },
+                    Control{ IdUpdate, ControlType::AccentButton, {}, L"Update" } });
+    }
+
     void Wizard::SetPage(Page page)
     {
         m_page = page;
@@ -992,7 +1072,7 @@ namespace
         {
             PostMessageW(context->hwnd, WM_APP_STEP_BEGIN, i, 0);
             const ULONGLONG started = GetTickCount64();
-            auto* result = new Setup::StepResult(steps[i].run());
+            auto* result = new Setup::StepResult(steps[i].run(*context->plan));
             const ULONGLONG elapsed = GetTickCount64() - started;
             if (elapsed < kMinimumStepMs)
             {
@@ -1037,6 +1117,18 @@ namespace
     void Wizard::OnRunDone()
     {
         m_running = false;
+        // A good download hands straight over to the Setup it fetched, which
+        // waits for this one to close before it installs.
+        if (m_plan && m_plan->downloading && !m_plan->downloadedPath.empty())
+        {
+            if (Setup::Launch(m_plan->downloadedPath, L"/update"))
+            {
+                DestroyWindow(m_hwnd);
+                return;
+            }
+            m_stepStates.front() = StepState::Failed;
+            m_stepNotes.front() = L"Windows wouldn't start the downloaded installer.";
+        }
         m_installed = Setup::QueryInstalled();
         if (m_installed.present)
         {
@@ -1144,6 +1236,20 @@ namespace
         case IdModeChange: m_modeRemove = false; Relayout(); break;
         case IdModeRemove: m_modeRemove = true; Relayout(); break;
         case IdLaunch: m_launchAfter = !m_launchAfter; Relayout(); break;
+        case IdUpdate:
+            StartRun(Setup::PlanDownload(m_release, m_hwnd));
+            break;
+        case IdNotNow:
+            DestroyWindow(m_hwnd);
+            break;
+        case IdSkipVersion:
+            Setup::SkipVersion(m_release.version);
+            DestroyWindow(m_hwnd);
+            break;
+        case IdAutoUpdate:
+            Setup::SetUpdateChecksEnabled(!Setup::UpdateChecksEnabled());
+            Relayout();
+            break;
         }
     }
 
@@ -1481,6 +1587,15 @@ namespace
             Relayout();
             m_transitionStart = GetTickCount64();
             StartAnimation();
+            if (m_mode == LaunchMode::ApplyUpdate)
+            {
+                PostMessageW(hwnd, WM_APP_BEGIN_UPDATE, 0, 0);
+            }
+            return 0;
+
+        case WM_APP_BEGIN_UPDATE:
+            // Straight to installing, with the options already chosen.
+            StartRun(Setup::PlanInstall(m_installed.options, hwnd));
             return 0;
 
         case WM_DPICHANGED:
@@ -1671,6 +1786,13 @@ namespace
             {
                 Setup::ScheduleRemoval(*m_plan);
             }
+            // A downloaded Setup lives in the temp directory; once the install
+            // has its own copy, this one is no longer needed.
+            if (m_mode == LaunchMode::ApplyUpdate && m_installed.present
+                && lstrcmpiW(Setup::ThisExe().c_str(), (m_installed.dir + L"\\Setup.exe").c_str()) != 0)
+            {
+                Setup::ScheduleDeletion(Setup::ThisExe(), std::wstring());
+            }
             PostQuitMessage(0);
             return 0;
         }
@@ -1679,57 +1801,110 @@ namespace
     }
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int)
+namespace
 {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int SetupMain(HINSTANCE instance)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
-    // The elevated half: no window, just the one registry change and an exit
-    // code for the half that asked.
-    if (argv != nullptr && argc >= 4 && lstrcmpiW(argv[1], L"/ifeo") == 0)
-    {
-        const int code = Setup::RunElevatedIfeo(argv[2], argv[3]);
-        LocalFree(argv);
-        return code;
-    }
-    const bool uninstall = argv != nullptr && argc >= 2 && lstrcmpiW(argv[1], L"/uninstall") == 0;
-    if (argv != nullptr)
-    {
-        LocalFree(argv);
-    }
-
-    // One wizard at a time: a second launch brings the first one forward.
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\CompactCalculatorSetup");
-    if (mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        if (HWND existing = FindWindowW(kWindowClass, nullptr))
+        // The elevated half: no window, just the one registry change and an exit
+        // code for the half that asked.
+        if (argv != nullptr && argc >= 4 && lstrcmpiW(argv[1], L"/ifeo") == 0)
         {
-            ShowWindow(existing, SW_RESTORE);
-            SetForegroundWindow(existing);
+            const int code = Setup::RunElevatedIfeo(argv[2], argv[3]);
+            LocalFree(argv);
+            return code;
         }
-        CloseHandle(mutex);
+        LaunchMode mode = LaunchMode::Normal;
+        if (argv != nullptr && argc >= 2)
+        {
+            mode = lstrcmpiW(argv[1], L"/uninstall") == 0     ? LaunchMode::Uninstall
+                : lstrcmpiW(argv[1], L"/checkupdate") == 0    ? LaunchMode::CheckUpdate
+                : lstrcmpiW(argv[1], L"/update") == 0         ? LaunchMode::ApplyUpdate
+                                                              : LaunchMode::Normal;
+        }
+        if (argv != nullptr)
+        {
+            LocalFree(argv);
+        }
+
+        // One wizard at a time: a second launch brings the first one forward.
+        // A background check just stands down, and a downloaded update waits
+        // for the Setup that downloaded it to finish closing.
+        HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\CompactCalculatorSetup");
+        if (mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS && mode == LaunchMode::ApplyUpdate)
+        {
+            WaitForSingleObject(mutex, 15000);
+        }
+        else if (mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            if (mode == LaunchMode::CheckUpdate)
+            {
+                CloseHandle(mutex);
+                return 0;
+            }
+            if (HWND existing = FindWindowW(kWindowClass, nullptr))
+            {
+                ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+            }
+            CloseHandle(mutex);
+            return 0;
+        }
+
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        Gdiplus::GdiplusStartupInput gdiplusInput;
+        ULONG_PTR gdiplusToken = 0;
+        Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr);
+
+        // The daily check shows nothing at all unless there is something to
+        // offer: not installed by Setup, turned off, already up to date,
+        // offline, or a version the user chose to skip all end here.
+        Setup::Release release;
+        if (mode == LaunchMode::CheckUpdate)
+        {
+            const Setup::Installed installed = Setup::QueryInstalled();
+            if (!installed.present || installed.byScript || !Setup::UpdateChecksEnabled()
+                || Setup::CheckForUpdate(release) != Setup::CheckResult::UpdateAvailable || Setup::IsVersionSkipped(release.version))
+            {
+                CloseHandle(mutex);
+                return 0;
+            }
+        }
+
+        g_wizard.Create(instance, mode, release);
+
+        MSG message{};
+        while (GetMessageW(&message, nullptr, 0, 0) > 0)
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        CoUninitialize();
+        if (mutex != nullptr)
+        {
+            CloseHandle(mutex);
+        }
         return 0;
     }
+}
 
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    Gdiplus::GdiplusStartupInput gdiplusInput;
-    ULONG_PTR gdiplusToken = 0;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr);
+// Setup's entry point, in place of the C runtime's.
+//
+// The MinGW startup code initialises things Setup never uses -- argument
+// vectors, thread-local storage callbacks, floating-point and math-error
+// hooks, an unhandled-exception filter -- and costs about 9KB to do it. msvcrt
+// initialises its own heap when it loads, and the command line comes from
+// GetCommandLineW, so all that is left to do here is what the startup code
+// does for C++: run the static constructors, through the same __main the CRT
+// calls. build.sh links with -nostartfiles and names this as the entry.
+extern "C" void __main();
 
-    g_wizard.Create(instance, uninstall);
-
-    MSG message{};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0)
-    {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-
-    Gdiplus::GdiplusShutdown(gdiplusToken);
-    CoUninitialize();
-    if (mutex != nullptr)
-    {
-        CloseHandle(mutex);
-    }
-    return 0;
+extern "C" void SetupEntry()
+{
+    __main();
+    ExitProcess(static_cast<UINT>(SetupMain(GetModuleHandleW(nullptr))));
 }

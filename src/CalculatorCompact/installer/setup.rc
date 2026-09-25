@@ -2,18 +2,19 @@
 // Licensed under the MIT License.
 
 #include <winresrc.h>
+#include "version.h"
 
 101 ICON "calculator.ico"
 
-// The calculator itself, extracted on install. build.sh stages the freshly
-// built Calculator.exe where windres can find it.
-200 RCDATA "Calculator.exe"
+// The calculator itself, LZMA-packed by tools/pack_payload.py and unpacked on
+// install. build.sh stages it where windres can find it.
+200 RCDATA "Calculator.exe.cz"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "setup.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1, 0, 0, 0
-PRODUCTVERSION 1, 0, 0, 0
+FILEVERSION CALC_VERSION_COMMA
+PRODUCTVERSION CALC_VERSION_COMMA
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0x0L
 FILEOS VOS_NT_WINDOWS32
@@ -25,12 +26,12 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription",  "Calculator Setup"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      CALC_VERSION_FULL
             VALUE "InternalName",     "CalculatorSetup"
             VALUE "LegalCopyright",   "Licensed under the MIT License."
             VALUE "OriginalFilename", "CalculatorSetup.exe"
             VALUE "ProductName",      "Calculator (compact build)"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   CALC_VERSION_FULL
         END
     END
     BLOCK "VarFileInfo"

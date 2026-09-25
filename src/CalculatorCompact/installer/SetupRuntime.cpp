@@ -47,6 +47,17 @@ namespace __gnu_cxx
     }
 }
 
+// Setup has its own entry point (SetupEntry, in SetupUi.cpp) rather than the
+// C runtime's, and atexit belongs to that runtime. The compiler still calls it
+// to register destructors for objects with static storage, and __main calls it
+// for its own table of them. Setup always leaves through ExitProcess, which
+// releases everything those destructors would, so registering them is all the
+// work there is to skip.
+extern "C" int atexit(void (*)(void))
+{
+    return 0;
+}
+
 // The library's operator new throws std::bad_alloc, and a reference to that
 // type is enough to bring the error machinery back in.
 void* operator new(std::size_t size)

@@ -47,3 +47,16 @@ OBJECTS+=("$OUT/engine_tests.o")
 
 echo "==> running"
 "$OUT/engine_tests"
+
+# Setup carries the calculator LZMA-packed and unpacks it with its own decoder
+# (installer/Unpack.cpp). Round-trip real executables through the same packer
+# the build uses, and check damaged input is refused.
+echo "==> installer payload round trip"
+"$CXX" -std=c++20 -O2 -Wall -o "$OUT/unpack_test" "$ROOT/tests/unpack_test.cpp" "$ROOT/installer/Unpack.cpp"
+PACKED=()
+for input in "$OUT/engine_tests" "$ROOT/out/Calculator.exe"; do
+  [ -f "$input" ] || continue
+  python3 "$ROOT/tools/pack_payload.py" "$input" "$OUT/$(basename "$input").cz" >/dev/null
+  PACKED+=("$OUT/$(basename "$input").cz" "$input")
+done
+"$OUT/unpack_test" "${PACKED[@]}"

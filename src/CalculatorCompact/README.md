@@ -345,13 +345,92 @@ deleted key. Setup refuses to delete the files while `calc.exe` still points
 at them -- if the administrator prompt is declined during removal, Calculator
 stays installed and says why, rather than leaving `calc.exe` opening nothing.
 
-The wizard is about 100KB on top of the calculator it carries. That took
-keeping the C++ runtime's error reporting out, as the calculator itself does
-(`installer/SetupRuntime.cpp`), and spelling out the five COM GUIDs it uses
-instead of linking `libuuid`, which brings every GUID Windows defines along
-with them: together, 121KB.
-
 It also recognises an install made with the script below and takes it over.
+
+### Size
+
+`CalculatorSetup.exe` is about 218KB -- smaller than the 343KB calculator it
+installs. Most of that is the calculator travelling compressed: LZMA after
+the x86 branch filter, the pair `xz` uses for executables, gets it to 130KB.
+`tools/pack_payload.py` packs it at build time with Python's own `lzma`
+module, and Setup unpacks it with a decoder of its own (`installer/Unpack.cpp`,
+after the reference decoder in the public-domain LZMA SDK) that decodes
+straight into the output, so there is no window to manage. It is checked
+against a CRC-32 before anything is written. `tests/unpack_test.cpp`
+round-trips it and checks that damaged and truncated input is refused;
+`tests/run_tests.sh` runs it on every test pass.
+
+The wizard around it is under 90KB, icon included. Each step, as the file
+size it left `CalculatorSetup.exe` at:
+
+| Step | Setup |
+| --- | --- |
+| First version | 570KB |
+| libstdc++'s error reporting kept out, as the calculator does (`installer/SetupRuntime.cpp`); the five COM GUIDs it uses written out rather than linking `libuuid`, which brings every GUID Windows defines | 449KB |
+| The calculator carried compressed | 239KB |
+| `-fno-threadsafe-statics`: the guard functions were what pulled in the C++ exception runtime | 222KB |
+| No unwind tables, and `-Oz` | 217KB |
+| Its own entry point in place of the MinGW startup code; steps as plain function pointers rather than `std::function` | 205KB |
+| GitHub updates added (below) | 218KB |
+
+The entry point is the one to know about. Setup starts at `SetupEntry`, which
+runs static constructors through the same `__main` the runtime would and then
+calls the wizard; it leaves through `ExitProcess`, so exit-time destructors
+have nothing to do and `atexit` is a no-op. Without the runtime nothing would
+apply MinGW's runtime pseudo-relocations either, so the link turns auto-import
+off: reading a DLL's variable without `dllimport` fails the build instead of
+leaving a pointer unpatched.
+
+None of this changes what the wizard looks like. All twelve of its screens,
+light and dark, captured before and after, are identical to the subpixel --
+apart from the size on the welcome page, which is measured from the
+calculator Setup carries and went from 342KB to 343KB when the calculator
+gained its daily update check.
+
+### Updates
+
+Setup checks this repository's GitHub releases for newer versions. The
+installed calculator starts `Setup.exe /checkupdate` at most once a day, and
+that asks `api.github.com` for the latest release. If it is newer than the
+installed version and has a `CalculatorSetup.exe` attached, Setup offers it:
+**Update**, **Not now**, or **Skip this version**, with a checkbox to turn the
+daily check off. Otherwise it exits without showing anything -- including
+while the repository has no releases at all, which GitHub answers with a 404.
+
+**Update** downloads the new `CalculatorSetup.exe`, checks it, and runs it
+with `/update`, which reinstalls over the top with the options already chosen
+and then removes itself from the temp directory. Calculator is closed first if
+it is open.
+
+The download is only trusted as far as it can be checked:
+
+- HTTPS only, including redirects; WinHTTP follows GitHub's redirect to its
+  storage host but never from HTTPS down to HTTP.
+- The asset has to be named `CalculatorSetup.exe` and come from
+  `github.com/Eripto/calculator/releases/download/`, not anywhere a release
+  could point.
+- Its size has to match the release listing, it has to be a Windows
+  executable, and its SHA-256 has to match the digest GitHub publishes for
+  the asset.
+- Drafts and prereleases are never offered.
+
+This was tested end to end against a local stand-in for GitHub over real
+HTTPS -- the shipped binary, the real host names, a certificate from a test
+CA -- covering the 404, an update installed through to the new version, a
+wrong checksum, a truncated download, an asset from another repository or
+over plain HTTP, prereleases, older and equal versions, `1.0.10` against
+`1.0.0`, skipping a version, and turning the check off.
+
+To publish a release:
+
+1. Put the new version in `VERSION` (MAJOR.MINOR.PATCH). It is the only place
+   it lives; `build.sh` passes it to both programs and their version
+   resources.
+2. Run `./build.sh`.
+3. On GitHub, create a release tagged `v` plus that version -- `v1.1.0` --
+   and attach `out/CalculatorSetup.exe` under exactly that name.
+
+Installs pick it up the next day they open Calculator.
 
 `CalculatorSetup.exe` is not code-signed, so the first time it runs from a
 download Windows SmartScreen will say it does not recognise it; **More info >
