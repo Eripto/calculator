@@ -566,6 +566,7 @@ namespace
         ACT_GRAPH_THEME_APP,
         ACT_GRAPH_THICKNESS,
         ACT_ALWAYS_ON_TOP,
+        ACT_CLOSE_WINDOW,
         ACT_APP_THEME,
         ACT_SETTINGS,
         ACT_CONV_FROM_UNIT,
@@ -624,7 +625,8 @@ namespace
         VIcon_Back,
         VIcon_History,
         VIcon_KeepOnTop,
-        VIcon_KeepOnTopOn,
+        VIcon_BackToWindow,
+        VIcon_ChromeClose,
         VIcon_Backspace,
         VIcon_ChevronDown,
         VIcon_ChevronUp,
@@ -688,6 +690,7 @@ namespace
         int vicon = 0;           // VIcon_*: drawn as a path instead of a glyph
         bool radio = false;      // draws a leading radio button
         bool accentText = false; // link-coloured label
+        bool caption = false;    // a title bar button: square, and Close turns red
         int textDip = 0;        // 0 = use the style default
     };
 
@@ -903,6 +906,8 @@ namespace
     constexpr int kBannerDip = 48;
     constexpr int kBannerStripDip = kBannerDip + 8;
     constexpr UINT WM_APP_UPDATE_CHECKED = WM_APP + 1; // Setup's daily check has finished
+    // Shared with Setup, which records what it installed and found here too.
+    constexpr wchar_t kStateKey[] = L"Software\\CompactCalculator";
     constexpr int kTitleDip = 20;    // SubtitleTextBlockStyle
     constexpr int kNavPaneDip = 256; // SplitViewOpenPaneLength in App.xaml
     constexpr int kExprRowDip = 22;
@@ -917,6 +922,18 @@ namespace
     constexpr int kRadiusDip = 4;
     constexpr int kPanelWidthDip = 300;
     constexpr int kDockThresholdDip = 640;
+
+    // Keep on top, which the shipping app does with a CompactOverlay view:
+    // 320x394 the first time, then whatever size it was last left at, in the
+    // top-right corner of the screen, with the title bar reduced to a
+    // "back to full view" button and Close.
+    constexpr int kCompactWidthDip = 320;
+    constexpr int kCompactHeightDip = 394;
+    constexpr int kCompactMinWidthDip = 208;
+    constexpr int kCompactMinHeightDip = 240;
+    constexpr int kCompactTitleDip = 32;
+    constexpr int kCompactMarginDip = 16; // from the corner of the work area
+    constexpr int kCaptionButtonDip = 46; // the width of a Windows caption button
 
     enum class Panel
     {
@@ -1526,7 +1543,11 @@ namespace
         std::unique_ptr<ConverterModel> m_converterModel;
         DateCalcModel m_dateModel;
         int m_converterCategory = 4; // Volume, the first converter category
+        // Keep on top: the compact overlay. The full window's placement is
+        // held while it is up, so leaving puts the window back exactly where
+        // and how it was, maximised included.
         bool m_alwaysOnTop = false;
+        WINDOWPLACEMENT m_fullPlacement{};
         int m_themeChoice = 0; // 0 system, 1 light, 2 dark
         bool m_themeExpanded = false;
         bool m_aboutExpanded = false;
@@ -1566,6 +1587,10 @@ namespace
 
         int BannerOffset() const
         {
+            if (m_alwaysOnTop)
+            {
+                return 0; // the compact overlay has no room for it; it is back on leaving
+            }
             return static_cast<int>(m_bannerAnim.Value() * static_cast<float>(Dp(kBannerStripDip)) + 0.5f);
         }
 
@@ -1705,6 +1730,7 @@ namespace
         void BuildGraphOptions(int contentRight, int height);
         void BuildNavLayout(int width, int height);
         void BuildSettingsLayout(int width, int height);
+        void BuildCompactLayout(int width, int height);
 
         // The overlay surfaces are independent of which mode is showing, so
         // every exit path from BuildLayout ends here.
@@ -1817,6 +1843,55 @@ namespace
         }
     }
 
+    // The compact overlay, laid out as Calculator.xaml's DisplayModeAlwaysOnTop
+    // state has it: the hamburger row, the expression and the memory strip
+    // collapse, and the result and the Standard keypad share what is left
+    // 72 to 308. Above them, a title bar of its own with the two buttons
+    // TitleBar.xaml's AOTMiniState shows.
+    void CalcApp::BuildCompactLayout(int width, int height)
+    {
+        m_docked = false;
+        m_panelRect = RECT{ 0, 0, width, height };
+        m_titleRect = RECT{};
+        m_exprRect = RECT{};
+
+        const int titleHeight = Dp(kCompactTitleDip);
+        const int buttonWidth = Dp(kCaptionButtonDip);
+
+        Btn back;
+        back.action = ACT_ALWAYS_ON_TOP;
+        back.style = Style::Flat;
+        back.caption = true;
+        back.vicon = VIcon_BackToWindow;
+        back.textDip = 16;
+        back.rc = { 0, 0, buttonWidth, titleHeight };
+        m_buttons.push_back(back);
+
+        Btn close;
+        close.action = ACT_CLOSE_WINDOW;
+        close.style = Style::Flat;
+        close.caption = true;
+        close.vicon = VIcon_ChromeClose;
+        close.textDip = 16;
+        close.rc = { width - buttonWidth, 0, width, titleHeight };
+        m_buttons.push_back(close);
+
+        const int pad = Dp(kPadDip);
+        const int rest = (std::max)(0, height - titleHeight - pad);
+        // RegularAlwaysOnTop holds the result row at 54px or more; below a
+        // 260px window, MinAlwaysOnTop lets it go down to 20.
+        const int minResult = Dp(height >= Dp(260) ? 54 : 20);
+        const int result = (std::min)(rest, (std::max)(minResult, MulDiv(rest, 72, 72 + 308)));
+        m_displayRect = { Dp(10), titleHeight, width - Dp(10), titleHeight + result };
+
+        RECT keypad{ pad, titleHeight + result, width - pad, height - pad };
+        if (keypad.bottom < keypad.top)
+        {
+            keypad.bottom = keypad.top;
+        }
+        AddGrid(kStandardKeys, ARRAYSIZE(kStandardKeys), 4, 6, keypad);
+    }
+
     void CalcApp::BuildLayout(int width, int height)
     {
         m_buttons.clear();
@@ -1824,6 +1899,12 @@ namespace
         m_memoryRects.clear();
 
         m_navButtons.clear();
+
+        if (m_alwaysOnTop)
+        {
+            BuildCompactLayout(width, height);
+            return;
+        }
 
         const int pad = Dp(kPadDip);
         const int gap = Dp(kGapDip);
@@ -1897,16 +1978,20 @@ namespace
             }
 
             // 10px after the title, per SquareIconButtonStyle's margin, but never
-            // so far right that it collides with the history toggle.
-            Btn onTop;
-            onTop.action = ACT_ALWAYS_ON_TOP;
-            onTop.style = Style::Flat;
-            onTop.vicon = m_alwaysOnTop ? VIcon_KeepOnTopOn : VIcon_KeepOnTop;
-            onTop.textDip = 16;
-            onTop.checked = m_alwaysOnTop;
-            const int onTopLeft = (std::min)(titleLeft + titleWidth + Dp(10), right - iconHalf * 2);
-            onTop.rc = { onTopLeft, centre - iconHalf, onTopLeft + iconHalf * 2, centre + iconHalf };
-            m_buttons.push_back(onTop);
+            // so far right that it collides with the history toggle. Standard
+            // only, as in the shipping app: the compact overlay is a Standard
+            // calculator.
+            if (m_mode == Mode::Standard)
+            {
+                Btn onTop;
+                onTop.action = ACT_ALWAYS_ON_TOP;
+                onTop.style = Style::Flat;
+                onTop.vicon = VIcon_KeepOnTop;
+                onTop.textDip = 16;
+                const int onTopLeft = (std::min)(titleLeft + titleWidth + Dp(10), right - iconHalf * 2);
+                onTop.rc = { onTopLeft, centre - iconHalf, onTopLeft + iconHalf * 2, centre + iconHalf };
+                m_buttons.push_back(onTop);
+            }
         }
         y += navH;
 
@@ -2537,6 +2622,35 @@ namespace
         return g_theme.primaryText;
     }
 
+    // Title bar buttons in the compact overlay fill their whole cell, square,
+    // the way Windows' own caption buttons do; Close fills red.
+    constexpr COLORREF kCloseHover = RGB(196, 43, 28);
+
+    void PaintCaptionButton(Gdiplus::Graphics& g, const Btn& b, float hot, float pressed)
+    {
+        const float active = (hot > pressed) ? hot : pressed;
+        if (active <= 0.004f)
+        {
+            return;
+        }
+        const COLORREF fill = (b.action == ACT_CLOSE_WINDOW)
+            ? Blend(kCloseHover, Mix(kCloseHover, g_theme.page, 0.1), pressed)
+            : Blend(g_theme.flatHover, g_theme.flatPress, pressed);
+        const BYTE alpha = static_cast<BYTE>(255.0f * active);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
+        g.FillRectangle(&brush, static_cast<INT>(b.rc.left), static_cast<INT>(b.rc.top),
+                        static_cast<INT>(b.rc.right - b.rc.left), static_cast<INT>(b.rc.bottom - b.rc.top));
+    }
+
+    COLORREF CaptionGlyphColor(const Btn& b, float hot, float pressed)
+    {
+        if (b.action != ACT_CLOSE_WINDOW)
+        {
+            return g_theme.primaryText;
+        }
+        return Blend(g_theme.primaryText, RGB(255, 255, 255), (hot > pressed) ? hot : pressed);
+    }
+
     // The shipping app sets mathematical variables in italic: x squared, one
     // over x, the roots, n factorial and so on. Operators and named functions
     // (exp, mod, log, ln) stay upright.
@@ -2698,18 +2812,25 @@ namespace
         pen.SetLineJoin(Gdiplus::LineJoinRound);
         Gdiplus::SolidBrush brush(gp);
 
+        // Every stroke goes through this one call rather than being expanded
+        // in place: the icons are a hundred-odd lines, and inlined they were
+        // most of the 16KB this function came to.
+        const auto line = [&](float x1, float y1, float x2, float y2) __attribute__((noinline)) {
+            g.DrawLine(&pen, P(x1, y1), P(x2, y2));
+        };
+
         switch (id)
         {
         case VIcon_Menu:
-            g.DrawLine(&pen, P(2.5f, 4.0f), P(13.5f, 4.0f));
-            g.DrawLine(&pen, P(2.5f, 8.0f), P(13.5f, 8.0f));
-            g.DrawLine(&pen, P(2.5f, 12.0f), P(13.5f, 12.0f));
+            line(2.5f, 4.0f, 13.5f, 4.0f);
+            line(2.5f, 8.0f, 13.5f, 8.0f);
+            line(2.5f, 12.0f, 13.5f, 12.0f);
             break;
 
         case VIcon_Back:
-            g.DrawLine(&pen, P(3.2f, 8.0f), P(13.0f, 8.0f));
-            g.DrawLine(&pen, P(7.6f, 3.6f), P(3.2f, 8.0f));
-            g.DrawLine(&pen, P(3.2f, 8.0f), P(7.6f, 12.4f));
+            line(3.2f, 8.0f, 13.0f, 8.0f);
+            line(7.6f, 3.6f, 3.2f, 8.0f);
+            line(3.2f, 8.0f, 7.6f, 12.4f);
             break;
 
         case VIcon_History:
@@ -2719,27 +2840,42 @@ namespace
             g.DrawArc(&pen, dial, 250.0f, 290.0f);
             const Gdiplus::PointF head[3] = { P(7.4f, 1.7f), P(7.4f, 5.7f), P(4.5f, 3.7f) };
             g.FillPolygon(&brush, head, 3);
-            g.DrawLine(&pen, P(8.0f, 5.6f), P(8.0f, 8.6f));
-            g.DrawLine(&pen, P(8.0f, 8.6f), P(10.5f, 9.9f));
+            line(8.0f, 5.6f, 8.0f, 8.6f);
+            line(8.0f, 8.6f, 10.5f, 9.9f);
             break;
         }
 
         case VIcon_KeepOnTop:
-        case VIcon_KeepOnTopOn:
         {
             // The shipping "keep on top" glyph: a window with a second, smaller
             // window pinned inside its trailing corner.
             Gdiplus::RectF outer(ox + 2.0f * s, oy + 3.4f * s, 12.0f * s, 9.2f * s);
             g.DrawRectangle(&pen, outer);
             Gdiplus::RectF inner(ox + 8.0f * s, oy + 7.2f * s, 4.6f * s, 3.6f * s);
-            if (id == VIcon_KeepOnTopOn)
-            {
-                g.FillRectangle(&brush, inner);
-            }
-            else
-            {
-                g.DrawRectangle(&pen, inner);
-            }
+            g.DrawRectangle(&pen, inner);
+            break;
+        }
+
+        case VIcon_BackToWindow:
+        {
+            // "Back to full view": the same window, with the small one
+            // filled in and an arrow leaving it for the far corner.
+            Gdiplus::RectF outer(ox + 2.0f * s, oy + 3.4f * s, 12.0f * s, 9.2f * s);
+            g.DrawRectangle(&pen, outer);
+            Gdiplus::RectF inner(ox + 8.0f * s, oy + 7.2f * s, 4.6f * s, 3.6f * s);
+            g.FillRectangle(&brush, inner);
+            line(7.0f, 8.2f, 4.2f, 5.6f);
+            line(4.2f, 5.6f, 6.6f, 5.6f);
+            line(4.2f, 5.6f, 4.2f, 7.8f);
+            break;
+        }
+
+        case VIcon_ChromeClose:
+        {
+            // The caption Close glyph: a thin ten-pixel cross.
+            Gdiplus::Pen thin(gp, 1.0f * s);
+            g.DrawLine(&thin, P(3.0f, 3.0f), P(13.0f, 13.0f));
+            g.DrawLine(&thin, P(13.0f, 3.0f), P(3.0f, 13.0f));
             break;
         }
 
@@ -2747,38 +2883,38 @@ namespace
         {
             const Gdiplus::PointF body[5] = { P(5.6f, 3.4f), P(14.4f, 3.4f), P(14.4f, 12.6f), P(5.6f, 12.6f), P(1.4f, 8.0f) };
             g.DrawPolygon(&pen, body, 5);
-            g.DrawLine(&pen, P(7.9f, 6.4f), P(11.7f, 9.6f));
-            g.DrawLine(&pen, P(11.7f, 6.4f), P(7.9f, 9.6f));
+            line(7.9f, 6.4f, 11.7f, 9.6f);
+            line(11.7f, 6.4f, 7.9f, 9.6f);
             break;
         }
 
         case VIcon_ChevronDown:
-            g.DrawLine(&pen, P(4.5f, 6.5f), P(8.0f, 10.0f));
-            g.DrawLine(&pen, P(8.0f, 10.0f), P(11.5f, 6.5f));
+            line(4.5f, 6.5f, 8.0f, 10.0f);
+            line(8.0f, 10.0f, 11.5f, 6.5f);
             break;
 
         case VIcon_ChevronUp:
-            g.DrawLine(&pen, P(4.5f, 9.5f), P(8.0f, 6.0f));
-            g.DrawLine(&pen, P(8.0f, 6.0f), P(11.5f, 9.5f));
+            line(4.5f, 9.5f, 8.0f, 6.0f);
+            line(8.0f, 6.0f, 11.5f, 9.5f);
             break;
 
         case VIcon_ChevronLeft:
-            g.DrawLine(&pen, P(9.5f, 4.5f), P(6.0f, 8.0f));
-            g.DrawLine(&pen, P(6.0f, 8.0f), P(9.5f, 11.5f));
+            line(9.5f, 4.5f, 6.0f, 8.0f);
+            line(6.0f, 8.0f, 9.5f, 11.5f);
             break;
 
         case VIcon_ChevronRight:
-            g.DrawLine(&pen, P(6.5f, 4.5f), P(10.0f, 8.0f));
-            g.DrawLine(&pen, P(10.0f, 8.0f), P(6.5f, 11.5f));
+            line(6.5f, 4.5f, 10.0f, 8.0f);
+            line(10.0f, 8.0f, 6.5f, 11.5f);
             break;
 
         case VIcon_Calendar:
         {
             Gdiplus::RectF body(ox + 2.0f * s, oy + 3.6f * s, 12.0f * s, 10.4f * s);
             g.DrawRectangle(&pen, body);
-            g.DrawLine(&pen, P(2.0f, 6.8f), P(14.0f, 6.8f));
-            g.DrawLine(&pen, P(5.4f, 2.0f), P(5.4f, 5.0f));
-            g.DrawLine(&pen, P(10.6f, 2.0f), P(10.6f, 5.0f));
+            line(2.0f, 6.8f, 14.0f, 6.8f);
+            line(5.4f, 2.0f, 5.4f, 5.0f);
+            line(10.6f, 2.0f, 10.6f, 5.0f);
             break;
         }
 
@@ -2802,53 +2938,53 @@ namespace
         }
 
         case VIcon_Close:
-            g.DrawLine(&pen, P(4.2f, 4.2f), P(11.8f, 11.8f));
-            g.DrawLine(&pen, P(11.8f, 4.2f), P(4.2f, 11.8f));
+            line(4.2f, 4.2f, 11.8f, 11.8f);
+            line(11.8f, 4.2f, 4.2f, 11.8f);
             break;
 
         case VIcon_ZoomIn:
         case VIcon_ZoomOut:
             g.DrawEllipse(&pen, ox + 2.2f * s, oy + 2.2f * s, 9.2f * s, 9.2f * s);
-            g.DrawLine(&pen, P(11.0f, 11.0f), P(14.0f, 14.0f));
-            g.DrawLine(&pen, P(4.4f, 6.8f), P(9.2f, 6.8f));
+            line(11.0f, 11.0f, 14.0f, 14.0f);
+            line(4.4f, 6.8f, 9.2f, 6.8f);
             if (id == VIcon_ZoomIn)
             {
-                g.DrawLine(&pen, P(6.8f, 4.4f), P(6.8f, 9.2f));
+                line(6.8f, 4.4f, 6.8f, 9.2f);
             }
             break;
 
         case VIcon_ZoomReset:
             // Reset view: a frame with arrows pushing out to its corners.
             g.DrawRectangle(&pen, Gdiplus::RectF(ox + 2.6f * s, oy + 2.6f * s, 10.8f * s, 10.8f * s));
-            g.DrawLine(&pen, P(6.0f, 6.0f), P(10.0f, 10.0f));
-            g.DrawLine(&pen, P(10.0f, 6.0f), P(6.0f, 10.0f));
+            line(6.0f, 6.0f, 10.0f, 10.0f);
+            line(10.0f, 6.0f, 6.0f, 10.0f);
             break;
 
         case VIcon_Plus:
-            g.DrawLine(&pen, P(8.0f, 3.5f), P(8.0f, 12.5f));
-            g.DrawLine(&pen, P(3.5f, 8.0f), P(12.5f, 8.0f));
+            line(8.0f, 3.5f, 8.0f, 12.5f);
+            line(3.5f, 8.0f, 12.5f, 8.0f);
             break;
 
         case VIcon_Minus:
-            g.DrawLine(&pen, P(3.5f, 8.0f), P(12.5f, 8.0f));
+            line(3.5f, 8.0f, 12.5f, 8.0f);
             break;
 
         case VIcon_Flask:
             // Scientific: a conical flask.
-            g.DrawLine(&pen, P(6.4f, 2.2f), P(6.4f, 6.6f));
-            g.DrawLine(&pen, P(9.6f, 2.2f), P(9.6f, 6.6f));
-            g.DrawLine(&pen, P(5.4f, 2.2f), P(10.6f, 2.2f));
-            g.DrawLine(&pen, P(6.4f, 6.6f), P(3.2f, 12.4f));
-            g.DrawLine(&pen, P(9.6f, 6.6f), P(12.8f, 12.4f));
-            g.DrawLine(&pen, P(3.2f, 12.4f), P(12.8f, 12.4f));
-            g.DrawLine(&pen, P(5.0f, 9.2f), P(11.0f, 9.2f));
+            line(6.4f, 2.2f, 6.4f, 6.6f);
+            line(9.6f, 2.2f, 9.6f, 6.6f);
+            line(5.4f, 2.2f, 10.6f, 2.2f);
+            line(6.4f, 6.6f, 3.2f, 12.4f);
+            line(9.6f, 6.6f, 12.8f, 12.4f);
+            line(3.2f, 12.4f, 12.8f, 12.4f);
+            line(5.0f, 9.2f, 11.0f, 9.2f);
             break;
 
         case VIcon_Curve:
         {
             // Graphing: axes with a curve rising across them.
-            g.DrawLine(&pen, P(2.6f, 2.6f), P(2.6f, 13.4f));
-            g.DrawLine(&pen, P(2.6f, 13.4f), P(13.4f, 13.4f));
+            line(2.6f, 2.6f, 2.6f, 13.4f);
+            line(2.6f, 13.4f, 13.4f, 13.4f);
             const Gdiplus::PointF curve[4] = { P(3.4f, 11.6f), P(6.4f, 10.4f), P(8.4f, 4.6f), P(12.8f, 3.4f) };
             g.DrawCurve(&pen, curve, 4);
             break;
@@ -2856,48 +2992,48 @@ namespace
 
         case VIcon_Code:
             // Programmer: angle brackets around a slash.
-            g.DrawLine(&pen, P(5.6f, 4.4f), P(2.4f, 8.0f));
-            g.DrawLine(&pen, P(2.4f, 8.0f), P(5.6f, 11.6f));
-            g.DrawLine(&pen, P(10.4f, 4.4f), P(13.6f, 8.0f));
-            g.DrawLine(&pen, P(13.6f, 8.0f), P(10.4f, 11.6f));
-            g.DrawLine(&pen, P(9.2f, 3.4f), P(6.8f, 12.6f));
+            line(5.6f, 4.4f, 2.4f, 8.0f);
+            line(2.4f, 8.0f, 5.6f, 11.6f);
+            line(10.4f, 4.4f, 13.6f, 8.0f);
+            line(13.6f, 8.0f, 10.4f, 11.6f);
+            line(9.2f, 3.4f, 6.8f, 12.6f);
             break;
 
         case VIcon_Cup:
             // Volume: a measuring cup with a level line.
-            g.DrawLine(&pen, P(3.4f, 3.4f), P(4.6f, 13.0f));
-            g.DrawLine(&pen, P(12.6f, 3.4f), P(11.4f, 13.0f));
-            g.DrawLine(&pen, P(4.6f, 13.0f), P(11.4f, 13.0f));
-            g.DrawLine(&pen, P(3.4f, 3.4f), P(12.6f, 3.4f));
-            g.DrawLine(&pen, P(4.1f, 8.6f), P(11.9f, 8.6f));
+            line(3.4f, 3.4f, 4.6f, 13.0f);
+            line(12.6f, 3.4f, 11.4f, 13.0f);
+            line(4.6f, 13.0f, 11.4f, 13.0f);
+            line(3.4f, 3.4f, 12.6f, 3.4f);
+            line(4.1f, 8.6f, 11.9f, 8.6f);
             break;
 
         case VIcon_Ruler:
             // Length: a rule with graduations.
             g.DrawRectangle(&pen, Gdiplus::RectF(ox + 1.8f * s, oy + 5.4f * s, 12.4f * s, 5.2f * s));
-            g.DrawLine(&pen, P(4.4f, 5.4f), P(4.4f, 8.0f));
-            g.DrawLine(&pen, P(6.8f, 5.4f), P(6.8f, 9.0f));
-            g.DrawLine(&pen, P(9.2f, 5.4f), P(9.2f, 8.0f));
-            g.DrawLine(&pen, P(11.6f, 5.4f), P(11.6f, 9.0f));
+            line(4.4f, 5.4f, 4.4f, 8.0f);
+            line(6.8f, 5.4f, 6.8f, 9.0f);
+            line(9.2f, 5.4f, 9.2f, 8.0f);
+            line(11.6f, 5.4f, 11.6f, 9.0f);
             break;
 
         case VIcon_Scales:
             // Weight and mass: a balance.
-            g.DrawLine(&pen, P(8.0f, 3.0f), P(8.0f, 13.0f));
-            g.DrawLine(&pen, P(3.0f, 5.0f), P(13.0f, 5.0f));
-            g.DrawLine(&pen, P(5.0f, 13.0f), P(11.0f, 13.0f));
-            g.DrawLine(&pen, P(3.0f, 5.0f), P(1.8f, 8.6f));
-            g.DrawLine(&pen, P(1.8f, 8.6f), P(4.2f, 8.6f));
-            g.DrawLine(&pen, P(4.2f, 8.6f), P(3.0f, 5.0f));
-            g.DrawLine(&pen, P(13.0f, 5.0f), P(11.8f, 8.6f));
-            g.DrawLine(&pen, P(11.8f, 8.6f), P(14.2f, 8.6f));
-            g.DrawLine(&pen, P(14.2f, 8.6f), P(13.0f, 5.0f));
+            line(8.0f, 3.0f, 8.0f, 13.0f);
+            line(3.0f, 5.0f, 13.0f, 5.0f);
+            line(5.0f, 13.0f, 11.0f, 13.0f);
+            line(3.0f, 5.0f, 1.8f, 8.6f);
+            line(1.8f, 8.6f, 4.2f, 8.6f);
+            line(4.2f, 8.6f, 3.0f, 5.0f);
+            line(13.0f, 5.0f, 11.8f, 8.6f);
+            line(11.8f, 8.6f, 14.2f, 8.6f);
+            line(14.2f, 8.6f, 13.0f, 5.0f);
             break;
 
         case VIcon_Thermometer:
             // Temperature: a bulb thermometer.
-            g.DrawLine(&pen, P(6.6f, 3.0f), P(6.6f, 9.4f));
-            g.DrawLine(&pen, P(9.4f, 3.0f), P(9.4f, 9.4f));
+            line(6.6f, 3.0f, 6.6f, 9.4f);
+            line(9.4f, 3.0f, 9.4f, 9.4f);
             g.DrawArc(&pen, ox + 6.6f * s, oy + 2.0f * s, 2.8f * s, 2.8f * s, 180.0f, 180.0f);
             g.DrawEllipse(&pen, ox + 5.4f * s, oy + 9.0f * s, 5.2f * s, 5.2f * s);
             g.FillEllipse(&brush, ox + 6.6f * s, oy + 10.2f * s, 2.8f * s, 2.8f * s);
@@ -2917,37 +3053,37 @@ namespace
         case VIcon_AreaGrid:
             // Area: a square divided into cells.
             g.DrawRectangle(&pen, Gdiplus::RectF(ox + 2.4f * s, oy + 2.4f * s, 11.2f * s, 11.2f * s));
-            g.DrawLine(&pen, P(8.0f, 2.4f), P(8.0f, 13.6f));
-            g.DrawLine(&pen, P(2.4f, 8.0f), P(13.6f, 8.0f));
+            line(8.0f, 2.4f, 8.0f, 13.6f);
+            line(2.4f, 8.0f, 13.6f, 8.0f);
             break;
 
         case VIcon_Speed:
             // Speed: a dial with a needle.
             g.DrawArc(&pen, ox + 1.8f * s, oy + 3.0f * s, 12.4f * s, 12.4f * s, 180.0f, 180.0f);
-            g.DrawLine(&pen, P(8.0f, 9.2f), P(11.0f, 5.6f));
+            line(8.0f, 9.2f, 11.0f, 5.6f);
             g.FillEllipse(&brush, ox + 7.2f * s, oy + 8.4f * s, 1.6f * s, 1.6f * s);
-            g.DrawLine(&pen, P(1.8f, 9.2f), P(3.2f, 9.2f));
-            g.DrawLine(&pen, P(12.8f, 9.2f), P(14.2f, 9.2f));
+            line(1.8f, 9.2f, 3.2f, 9.2f);
+            line(12.8f, 9.2f, 14.2f, 9.2f);
             break;
 
         case VIcon_Clock:
             // Time: a clock face.
             g.DrawEllipse(&pen, ox + 2.2f * s, oy + 2.2f * s, 11.6f * s, 11.6f * s);
-            g.DrawLine(&pen, P(8.0f, 4.8f), P(8.0f, 8.0f));
-            g.DrawLine(&pen, P(8.0f, 8.0f), P(10.6f, 9.4f));
+            line(8.0f, 4.8f, 8.0f, 8.0f);
+            line(8.0f, 8.0f, 10.6f, 9.4f);
             break;
 
         case VIcon_Plug:
             // Power: the standard power symbol.
             g.DrawArc(&pen, ox + 3.0f * s, oy + 3.6f * s, 10.0f * s, 10.0f * s, 300.0f, 300.0f);
-            g.DrawLine(&pen, P(8.0f, 1.8f), P(8.0f, 7.4f));
+            line(8.0f, 1.8f, 8.0f, 7.4f);
             break;
 
         case VIcon_Data:
             // Data: stacked platters.
             g.DrawEllipse(&pen, ox + 2.6f * s, oy + 2.4f * s, 10.8f * s, 3.4f * s);
-            g.DrawLine(&pen, P(2.6f, 4.1f), P(2.6f, 11.9f));
-            g.DrawLine(&pen, P(13.4f, 4.1f), P(13.4f, 11.9f));
+            line(2.6f, 4.1f, 2.6f, 11.9f);
+            line(13.4f, 4.1f, 13.4f, 11.9f);
             g.DrawArc(&pen, ox + 2.6f * s, oy + 6.4f * s, 10.8f * s, 3.4f * s, 0.0f, 180.0f);
             g.DrawArc(&pen, ox + 2.6f * s, oy + 10.2f * s, 10.8f * s, 3.4f * s, 0.0f, 180.0f);
             break;
@@ -2955,16 +3091,16 @@ namespace
         case VIcon_Gauge:
             // Pressure: a gauge with a needle and a stem.
             g.DrawEllipse(&pen, ox + 2.6f * s, oy + 1.8f * s, 10.8f * s, 10.8f * s);
-            g.DrawLine(&pen, P(8.0f, 7.2f), P(10.4f, 4.8f));
-            g.DrawLine(&pen, P(6.6f, 12.4f), P(9.4f, 12.4f));
-            g.DrawLine(&pen, P(7.0f, 12.4f), P(7.0f, 14.2f));
-            g.DrawLine(&pen, P(9.0f, 12.4f), P(9.0f, 14.2f));
+            line(8.0f, 7.2f, 10.4f, 4.8f);
+            line(6.6f, 12.4f, 9.4f, 12.4f);
+            line(7.0f, 12.4f, 7.0f, 14.2f);
+            line(9.0f, 12.4f, 9.0f, 14.2f);
             break;
 
         case VIcon_Angle:
             // Angle: two rays with an arc between them.
-            g.DrawLine(&pen, P(2.6f, 12.4f), P(13.4f, 12.4f));
-            g.DrawLine(&pen, P(2.6f, 12.4f), P(12.0f, 4.2f));
+            line(2.6f, 12.4f, 13.4f, 12.4f);
+            line(2.6f, 12.4f, 12.0f, 4.2f);
             g.DrawArc(&pen, ox + 2.6f * s, oy + 7.6f * s, 9.6f * s, 9.6f * s, 270.0f, 49.0f);
             break;
 
@@ -2973,8 +3109,8 @@ namespace
             g.DrawEllipse(&pen, ox + 10.2f * s, oy + 1.8f * s, 3.6f * s, 3.6f * s);
             g.DrawEllipse(&pen, ox + 2.2f * s, oy + 6.2f * s, 3.6f * s, 3.6f * s);
             g.DrawEllipse(&pen, ox + 10.2f * s, oy + 10.6f * s, 3.6f * s, 3.6f * s);
-            g.DrawLine(&pen, P(5.6f, 7.0f), P(10.4f, 4.2f));
-            g.DrawLine(&pen, P(5.6f, 9.0f), P(10.4f, 11.8f));
+            line(5.6f, 7.0f, 10.4f, 4.2f);
+            line(5.6f, 9.0f, 10.4f, 11.8f);
             break;
 
         case VIcon_Trace:
@@ -2987,39 +3123,39 @@ namespace
 
         case VIcon_GraphSettings:
             // A plot with a gear in its corner.
-            g.DrawLine(&pen, P(2.4f, 2.4f), P(2.4f, 12.0f));
-            g.DrawLine(&pen, P(2.4f, 12.0f), P(12.0f, 12.0f));
-            g.DrawLine(&pen, P(3.4f, 9.6f), P(7.0f, 5.2f));
+            line(2.4f, 2.4f, 2.4f, 12.0f);
+            line(2.4f, 12.0f, 12.0f, 12.0f);
+            line(3.4f, 9.6f, 7.0f, 5.2f);
             g.DrawEllipse(&pen, ox + 9.4f * s, oy + 2.2f * s, 4.4f * s, 4.4f * s);
-            g.DrawLine(&pen, P(11.6f, 1.2f), P(11.6f, 7.6f));
-            g.DrawLine(&pen, P(8.4f, 4.4f), P(14.8f, 4.4f));
+            line(11.6f, 1.2f, 11.6f, 7.6f);
+            line(8.4f, 4.4f, 14.8f, 4.4f);
             break;
 
         case VIcon_Recenter:
             // Recentre: a crosshair over the origin.
             g.DrawEllipse(&pen, ox + 4.6f * s, oy + 4.6f * s, 6.8f * s, 6.8f * s);
-            g.DrawLine(&pen, P(8.0f, 1.6f), P(8.0f, 4.0f));
-            g.DrawLine(&pen, P(8.0f, 12.0f), P(8.0f, 14.4f));
-            g.DrawLine(&pen, P(1.6f, 8.0f), P(4.0f, 8.0f));
-            g.DrawLine(&pen, P(12.0f, 8.0f), P(14.4f, 8.0f));
+            line(8.0f, 1.6f, 8.0f, 4.0f);
+            line(8.0f, 12.0f, 8.0f, 14.4f);
+            line(1.6f, 8.0f, 4.0f, 8.0f);
+            line(12.0f, 8.0f, 14.4f, 8.0f);
             g.FillEllipse(&brush, ox + 7.0f * s, oy + 7.0f * s, 2.0f * s, 2.0f * s);
             break;
 
         case VIcon_Enter:
             // The return arrow on the graphing keypad's accent key.
-            g.DrawLine(&pen, P(12.2f, 3.6f), P(12.2f, 9.6f));
-            g.DrawLine(&pen, P(12.2f, 9.6f), P(4.6f, 9.6f));
-            g.DrawLine(&pen, P(7.6f, 6.6f), P(4.2f, 9.6f));
-            g.DrawLine(&pen, P(4.2f, 9.6f), P(7.6f, 12.6f));
+            line(12.2f, 3.6f, 12.2f, 9.6f);
+            line(12.2f, 9.6f, 4.6f, 9.6f);
+            line(7.6f, 6.6f, 4.2f, 9.6f);
+            line(4.2f, 9.6f, 7.6f, 12.6f);
             break;
 
         case VIcon_Fx:
             // The equations tab: a lowercase f beside an x.
             g.DrawArc(&pen, ox + 4.4f * s, oy + 2.4f * s, 4.0f * s, 4.0f * s, 180.0f, 140.0f);
-            g.DrawLine(&pen, P(5.6f, 4.4f), P(5.6f, 13.2f));
-            g.DrawLine(&pen, P(3.4f, 7.2f), P(8.0f, 7.2f));
-            g.DrawLine(&pen, P(9.6f, 8.4f), P(13.6f, 13.2f));
-            g.DrawLine(&pen, P(13.6f, 8.4f), P(9.6f, 13.2f));
+            line(5.6f, 4.4f, 5.6f, 13.2f);
+            line(3.4f, 7.2f, 8.0f, 7.2f);
+            line(9.6f, 8.4f, 13.6f, 13.2f);
+            line(13.6f, 8.4f, 9.6f, 13.2f);
             break;
 
         case VIcon_RadioOff:
@@ -3053,7 +3189,7 @@ namespace
             // The app's own icon: a keypad with a display across the top.
             Gdiplus::RectF body(ox + 3.0f * s, oy + 1.6f * s, 10.0f * s, 12.8f * s);
             g.DrawRectangle(&pen, body);
-            g.DrawLine(&pen, P(5.0f, 5.4f), P(11.0f, 5.4f));
+            line(5.0f, 5.4f, 11.0f, 5.4f);
             for (int row = 0; row < 2; ++row)
             {
                 for (int col = 0; col < 3; ++col)
@@ -3084,14 +3220,13 @@ namespace
     // ".333...e-1" with its leading digit missing, or a binary word showing
     // eight nibbles of sixteen. Shrinking further is worse typography than
     // clipping is wrong.
-    void DrawAutoFitNumber(HDC hdc, const RECT& rc, std::wstring_view text, COLORREF color)
+    void DrawAutoFitNumber(HDC hdc, const RECT& rc, std::wstring_view text, COLORREF color, int maxDip = 46)
     {
-        constexpr int kMaxDip = 46;
         constexpr int kMinDip = 8;
 
         const int maxWidth = rc.right - rc.left;
         SIZE size{};
-        int dip = kMaxDip;
+        int dip = maxDip;
         for (;;)
         {
             SelectObject(hdc, GetFont(dip, FW_SEMIBOLD, 1));
@@ -4478,6 +4613,11 @@ namespace
                 float hot = 0.0f;
                 float pressed = 0.0f;
                 ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
+                if (b.caption)
+                {
+                    PaintCaptionButton(g, b, hot, pressed);
+                    continue;
+                }
                 bool painted = false;
                 const COLORREF fill = ButtonFill(b, hot, pressed, painted);
                 if (painted)
@@ -4509,6 +4649,11 @@ namespace
                 float hot = 0.0f;
                 float pressed = 0.0f;
                 ButtonMotion(app, b, static_cast<int>(i), app.m_hot, app.m_pressed, hot, pressed);
+                if (b.caption)
+                {
+                    DrawVectorIcon(g, b.rc, id, CaptionGlyphColor(b, hot, pressed), b.textDip);
+                    continue;
+                }
                 RECT box = PressedRect(b.rc, pressed);
                 if (b.leftAlign)
                 {
@@ -4587,6 +4732,7 @@ namespace
         }
 
         // Mode name beside the navigation button.
+        if (!app.m_alwaysOnTop)
         {
             DrawLabel(
                 hdc, app.m_titleRect, app.ModeName(), kTitleDip, g_theme.primaryText, false,
@@ -4609,6 +4755,8 @@ namespace
         else
         {
         // Expression line, with the open-parenthesis count when one is pending.
+        // The compact overlay has neither.
+        if (!app.m_alwaysOnTop)
         {
             if (app.m_openParens > 0)
             {
@@ -4634,7 +4782,11 @@ namespace
             DrawTail(hdc, app.m_exprRect, app.m_expression, 12, g_theme.secondaryText);
         }
 
-        DrawAutoFitNumber(hdc, app.m_displayRect, app.m_primary, app.m_isError ? g_theme.primaryText : g_theme.primaryText);
+        // AOTResultsStyle sets the compact overlay's result in 40px, and
+        // MinAlwaysOnTop in 18px once the result row is squeezed.
+        const int resultDip = !app.m_alwaysOnTop ? 46
+            : (app.m_displayRect.bottom - app.m_displayRect.top < Dp(54)) ? 18 : 40;
+        DrawAutoFitNumber(hdc, app.m_displayRect, app.m_primary, g_theme.primaryText, resultDip);
 
         // Programmer readouts: an accent bar marks the active row, then the radix
         // name and its value, both left aligned.
@@ -5275,6 +5427,127 @@ namespace
         }
     }
 
+    // ---------------------------------------------------------- keep on top
+
+    // The compact overlay keeps no caption: its style drops WS_CAPTION, and
+    // WM_NCCALCSIZE gives the top of the sizing frame to the client, where
+    // the overlay draws a title bar of its own. The sizing frame stays at the
+    // sides and bottom, which Windows 10 and 11 draw invisibly.
+    constexpr LONG_PTR kCompactDropped = WS_CAPTION | WS_MAXIMIZEBOX;
+
+    RECT CompactFrame()
+    {
+        RECT frame{};
+        AdjustWindowRectExForDpi(&frame, WS_THICKFRAME, FALSE, 0, static_cast<UINT>(g_dpi));
+        return RECT{ -frame.left, 0, frame.right, frame.bottom };
+    }
+
+    // Where the overlay was last left: its top-left corner on screen, and its
+    // size in DIPs so that it survives a change of display scale.
+    struct CompactPlacement
+    {
+        LONG left;
+        LONG top;
+        LONG width;
+        LONG height;
+    };
+
+    // The window rect for the overlay: the size and place it was last left
+    // at, or 320x394 in the top-right corner of the screen the calculator is
+    // on, which is where Windows puts a CompactOverlay view -- and where it
+    // goes back to if the screen it was on has gone.
+    RECT CompactWindowRect(HWND hwnd)
+    {
+        CompactPlacement saved{ 0, 0, kCompactWidthDip, kCompactHeightDip };
+        DWORD size = sizeof(saved);
+        const bool remembered = RegGetValueW(HKEY_CURRENT_USER, kStateKey, L"CompactWindow", RRF_RT_REG_BINARY, nullptr, &saved, &size) == ERROR_SUCCESS
+            && size == sizeof(saved);
+        const int width = Dp((std::max)(kCompactMinWidthDip, static_cast<int>(saved.width)));
+        const int height = Dp((std::max)(kCompactMinHeightDip, static_cast<int>(saved.height)));
+
+        RECT visible{ saved.left, saved.top, saved.left + width, saved.top + height };
+        HMONITOR screen = remembered ? MonitorFromRect(&visible, MONITOR_DEFAULTTONULL) : nullptr;
+        MONITORINFO monitor{ sizeof(monitor) };
+        if (screen == nullptr)
+        {
+            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+            const int margin = Dp(kCompactMarginDip);
+            visible = { monitor.rcWork.right - margin - width, monitor.rcWork.top + margin, monitor.rcWork.right - margin,
+                        monitor.rcWork.top + margin + height };
+        }
+        else
+        {
+            GetMonitorInfoW(screen, &monitor);
+        }
+
+        // Wholly on that screen's work area, title bar included.
+        const RECT& work = monitor.rcWork;
+        OffsetRect(&visible, (std::min)(0L, work.right - visible.right), (std::min)(0L, work.bottom - visible.bottom));
+        OffsetRect(&visible, (std::max)(0L, work.left - visible.left), (std::max)(0L, work.top - visible.top));
+
+        const RECT frame = CompactFrame();
+        return RECT{ visible.left - frame.left, visible.top, visible.right + frame.right, visible.bottom + frame.bottom };
+    }
+
+    void SaveCompactPlacement(HWND hwnd)
+    {
+        if (IsIconic(hwnd))
+        {
+            return;
+        }
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        POINT origin{};
+        ClientToScreen(hwnd, &origin);
+        const CompactPlacement placement{ origin.x, origin.y, MulDiv(client.right, 96, g_dpi), MulDiv(client.bottom, 96, g_dpi) };
+        RegSetKeyValueW(HKEY_CURRENT_USER, kStateKey, L"CompactWindow", REG_BINARY, &placement, sizeof(placement));
+    }
+
+    // Into and out of the compact overlay. Going in, the window loses its
+    // caption and its maximise button, keeps its rounded corners on Windows
+    // 11, and floats above other windows; coming out, all of that is undone
+    // and the window goes back to the placement it had.
+    void ToggleCompactOverlay(CalcApp& app)
+    {
+        HWND hwnd = app.m_hwnd;
+        const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if (!app.m_alwaysOnTop)
+        {
+            app.m_fullPlacement.length = sizeof(app.m_fullPlacement);
+            GetWindowPlacement(hwnd, &app.m_fullPlacement);
+            CloseMenus();
+            app.ForceClosePanel();
+            app.m_navOpen = false;
+            app.m_navAnim.Set(0.0f);
+            app.m_settingsOpen = false;
+            app.m_settingsAnim.Set(0.0f);
+            if (IsZoomed(hwnd))
+            {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            app.m_alwaysOnTop = true;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~kCompactDropped);
+            // DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND: a window without a
+            // caption is not rounded unless it asks. A no-op before Windows 11.
+            const DWORD round = 2;
+            DwmSetWindowAttribute(hwnd, 33, &round, sizeof(round));
+            const RECT rc = CompactWindowRect(hwnd);
+            SetWindowPos(hwnd, HWND_TOPMOST, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_FRAMECHANGED);
+        }
+        else
+        {
+            SaveCompactPlacement(hwnd);
+            app.m_alwaysOnTop = false;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | kCompactDropped);
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+            SetWindowPlacement(hwnd, &app.m_fullPlacement);
+        }
+        app.m_hot = -1;
+        app.m_pressed = -1;
+        app.StartContentEnter();
+        app.Relayout();
+    }
+
     // Flattens a stored expression into the raw engine commands that rebuild it,
     // mirroring the shipping ViewModel's replay.
     std::vector<int> FlattenCommands(const std::vector<std::shared_ptr<IExpressionCommand>>& commands)
@@ -5697,9 +5970,10 @@ namespace
             break;
         }
         case ACT_ALWAYS_ON_TOP:
-            app.m_alwaysOnTop = !app.m_alwaysOnTop;
-            SetWindowPos(app.m_hwnd, app.m_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            app.Relayout();
+            ToggleCompactOverlay(app);
+            break;
+        case ACT_CLOSE_WINDOW:
+            PostMessageW(app.m_hwnd, WM_CLOSE, 0, 0);
             break;
         case ACT_MODE_DATE:
             app.SetMode(Mode::Date);
@@ -6144,8 +6418,16 @@ namespace
         CalcApp& app = g_app;
         if (alt)
         {
+            // Alt+Up and Alt+Down, the shipping app's accelerators for going
+            // into and out of the compact overlay. While it is up, the other
+            // modes are out of reach.
+            if (app.m_alwaysOnTop)
+            {
+                return (vk == VK_DOWN) ? ACT_ALWAYS_ON_TOP : ACT_NONE;
+            }
             switch (vk)
             {
+            case VK_UP: return (app.m_mode == Mode::Standard) ? ACT_ALWAYS_ON_TOP : ACT_NONE;
             // Numbered as NavCategory.cs numbers them.
             case '1': return ACT_MODE_STANDARD;
             case '2': return ACT_MODE_SCIENTIFIC;
@@ -6157,6 +6439,10 @@ namespace
         }
         if (ctrl)
         {
+            if (app.m_alwaysOnTop)
+            {
+                return ACT_NONE; // memory and history are not part of the overlay
+            }
             switch (vk)
             {
             case 'M': return ACT_MEM_STORE;
@@ -6225,8 +6511,11 @@ namespace
         FlashAction(hwnd, action);
         const int pressed = g_app.m_pressed;
         Execute(action);
-        // Relayout() rebuilds the button list, so restore the flash index.
-        if (pressed >= 0 && pressed < static_cast<int>(g_app.m_buttons.size()))
+        // Relayout() rebuilds the button list, so restore the flash index --
+        // unless the action swapped the layout out, and it now names some
+        // other key.
+        if (pressed >= 0 && pressed < static_cast<int>(g_app.m_buttons.size())
+            && g_app.m_buttons[static_cast<size_t>(pressed)].action == action)
         {
             g_app.m_pressed = pressed;
         }
@@ -6273,9 +6562,60 @@ namespace
             app.Relayout();
             return 0;
 
+        case WM_NCCALCSIZE:
+            if (app.m_alwaysOnTop && wParam)
+            {
+                // The sizing frame, less its top edge: the overlay draws its
+                // own title bar there, and WM_NCHITTEST resizes from it.
+                auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+                const LONG top = params->rgrc[0].top;
+                const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
+                params->rgrc[0].top = top;
+                return result;
+            }
+            break;
+
+        case WM_NCHITTEST:
+            if (app.m_alwaysOnTop)
+            {
+                // The sides and bottom are still real frame. At the top, a
+                // thin band resizes, and the title bar between its two
+                // buttons drags the window.
+                const LRESULT hit = DefWindowProcW(hwnd, message, wParam, lParam);
+                if (hit != HTCLIENT)
+                {
+                    return hit;
+                }
+                POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ScreenToClient(hwnd, &pt);
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                const int buttonWidth = Dp(kCaptionButtonDip);
+                if (pt.x >= buttonWidth && pt.x < client.right - buttonWidth)
+                {
+                    if (pt.y < Dp(4))
+                    {
+                        return HTTOP;
+                    }
+                    if (pt.y < Dp(kCompactTitleDip))
+                    {
+                        return HTCAPTION;
+                    }
+                }
+                return HTCLIENT;
+            }
+            break;
+
         case WM_GETMINMAXINFO:
         {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+            if (app.m_alwaysOnTop)
+            {
+                const RECT frame = CompactFrame();
+                info->ptMinTrackSize.x = Dp(kCompactMinWidthDip) + frame.left + frame.right;
+                info->ptMinTrackSize.y = Dp(kCompactMinHeightDip) + frame.bottom;
+                return 0;
+            }
             const int minHeight = (app.m_mode == Mode::Programmer) ? 600 : 500;
             RECT frame{ 0, 0, Dp(320), Dp(minHeight) };
             AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0, static_cast<UINT>(g_dpi));
@@ -6702,6 +7042,10 @@ namespace
             return 0;
 
         case WM_DESTROY:
+            if (app.m_alwaysOnTop)
+            {
+                SaveCompactPlacement(hwnd);
+            }
             g_backBuffer.Release();
             g_scratch.Release();
             g_themeLayer.Release();
@@ -6721,13 +7065,12 @@ namespace
     //
     // A Setup.exe beside the calculator means Setup installed it, and Setup is
     // what talks to GitHub. Once a day it is started with /checkupdate: it
-    // asks for the latest release and records a newer version under the key
-    // below, or clears it, and exits without showing anything. The calculator
-    // waits for it on a thread of its own -- so nothing here ever waits on the
-    // network -- and then shows or hides the banner from what it recorded.
-    // Update on the banner hands over to "Setup.exe /downloadupdate".
+    // asks for the latest release and records a newer version under
+    // kStateKey, or clears it, and exits without showing anything. The
+    // calculator waits for it on a thread of its own -- so nothing here ever
+    // waits on the network -- and then shows or hides the banner from what it
+    // recorded. Update on the banner hands over to "Setup.exe /downloadupdate".
 
-    constexpr wchar_t kStateKey[] = L"Software\\CompactCalculator";
     constexpr ULONGLONG kDay = 24ull * 60 * 60 * 10000000; // FILETIME counts 100ns
 
     bool SetupBeside(wchar_t (&path)[MAX_PATH])
@@ -7546,6 +7889,15 @@ namespace
 
         const int listTop = Dp(kNavRowDip);
         const int listBottom = height - Dp(52);
+
+        // The list scrolls only as far as its last row, whatever the wheel asks.
+        const int headerHeight = rowHeight - Dp(6);
+        m_navContentHeight = headerHeight + static_cast<int>(kConverterCategories.size()) * rowHeight; // Converter
+        for (const NavEntry& entry : kCalculatorNav)
+        {
+            m_navContentHeight += entry.isHeader ? headerHeight : rowHeight;
+        }
+        m_navScroll = (std::max)(0, (std::min)(m_navScroll, m_navContentHeight - (listBottom - listTop)));
         int y = listTop - m_navScroll;
 
         const auto addRow = [&](std::wstring_view label, std::wstring_view glyph, int action, bool header, bool current) {
@@ -7572,7 +7924,7 @@ namespace
             {
                 m_navGlyphs.push_back({ glyph, RECT{ 0, 0, 0, 0 }, header });
             }
-            y += header ? rowHeight - Dp(6) : rowHeight;
+            y += header ? headerHeight : rowHeight;
         };
 
         m_navGlyphs.clear();
@@ -7582,6 +7934,7 @@ namespace
             const bool current = !entry.isHeader && m_mode != Mode::Converter
                 && ((entry.action == ACT_MODE_STANDARD && m_mode == Mode::Standard)
                     || (entry.action == ACT_MODE_SCIENTIFIC && m_mode == Mode::Scientific)
+                    || (entry.action == ACT_MODE_GRAPHING && m_mode == Mode::Graphing)
                     || (entry.action == ACT_MODE_PROGRAMMER && m_mode == Mode::Programmer)
                     || (entry.action == ACT_MODE_DATE && m_mode == Mode::Date));
             addRow(entry.label, entry.glyph, entry.action, entry.isHeader, current);
@@ -7593,8 +7946,6 @@ namespace
             const bool current = (m_mode == Mode::Converter) && (m_converterCategory == category.id);
             addRow(category.name, category.glyph, ACT_CONV_CATEGORY_BASE + category.id, false, current);
         }
-
-        m_navContentHeight = (y + m_navScroll) - listTop;
 
         Btn settings;
         settings.label = L"Settings";

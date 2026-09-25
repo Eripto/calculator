@@ -25,7 +25,8 @@ drawing, which is where the size saving comes from.
 | Converter | All 12 unit categories — Volume, Length, Weight and mass, Temperature, Energy, Area, Speed, Time, Power, Data, Pressure, Angle — 158 units, the whimsical units, and the "About equal to" suggestions |
 | Memory | `MC MR M+ M- MS` strip plus the multi-slot memory list with per-slot commands |
 | History | Panel with newest-first entries; clicking one restores it by replaying its stored commands |
-| Chrome | Navigation pane with both category groups, Always on top, Settings/About, light/dark theme following the system setting, system accent colour, per-monitor DPI v2, dark title bar, keyboard shortcuts |
+| Keep on top | The compact overlay, as the shipping app's CompactOverlay view: a 320x394 window in the top-right corner of the screen, floating above everything, with just the result and the Standard keypad under a title bar reduced to "Back to full view" and Close. It remembers where it was moved and how big it was left; leaving puts the full window back exactly as it was. Alt+Up and Alt+Down, as in the shipping app |
+| Chrome | Navigation pane with both category groups, keep on top, Settings/About, light/dark theme following the system setting, system accent colour, per-monitor DPI v2, dark title bar, keyboard shortcuts |
 | Motion | Sliding navigation pane and settings page, fading flyouts, page-transition on mode change, history/memory panel that slides and cross-fades both ways, a 450ms theme cross-fade, and Fluent hover and pointer-down states on every key |
 
 ### Not included, and why
@@ -98,16 +99,17 @@ corrected where it diverged:
 | Settings | Rebuilt as cards under "Appearance" and "About" section headers, replacing a flat list of rows |
 | Combo boxes | Unit pickers and the date-mode picker anchor their text to the leading edge with the chevron at the trailing one, instead of centring both |
 | Glyphs | `M−` uses a real minus sign (U+2212), not a hyphen |
-| Title bar | Hamburger, mode name in `SubtitleTextBlockStyle` (20px semibold), then the keep-on-top button immediately after the title, as `MainPage.xaml` lays it out. History is the only trailing item |
+| Title bar | Hamburger, mode name in `SubtitleTextBlockStyle` (20px semibold), then the keep-on-top button immediately after the title, as `MainPage.xaml` lays it out -- in Standard only, since the overlay is a Standard calculator. History is the only trailing item |
 | Navigation pane | `SplitViewOpenPaneLength` (256px) rather than the full window, so the keypad stays visible beside it; WinUI selection indicator (a 3x16 accent bar on the leading edge) and a scrollbar |
 | Settings | The app theme is a `SettingsExpander` holding Light / Dark / Use system setting radio buttons, so clicking the card expands it instead of cycling the theme. About expands to the licence links, and the page closes with the "Send feedback" link and the contribute paragraph |
 | Chrome icons | Drawn as paths rather than font glyphs (see below) |
 
 ### Why the icons are vector paths
 
-The hamburger, back arrow, history, keep-on-top, backspace, chevrons, calendar,
-gear, radio buttons and the two settings header icons are drawn with GDI+ paths
-on a 16x16 grid, the same grid the icon fonts are designed on.
+The hamburger, back arrow, history, keep-on-top, the overlay's back and Close
+buttons, backspace, chevrons, calendar, gear, radio buttons and the two
+settings header icons are drawn with GDI+ paths on a 16x16 grid, the same grid
+the icon fonts are designed on.
 
 Font glyphs were the obvious choice and the wrong one. `Segoe Fluent Icons` and
 `Segoe MDL2 Assets` do not carry every codepoint on every machine, and the
@@ -196,6 +198,16 @@ and `sqrt` saves about 13 KB, but it moves results by a few ulp; LTO alone made
 the target, so precision stayed exactly as it was. And `-fno-exceptions` on the
 UI translation units is not available at all — `main.cpp` catches what the
 engine throws.
+
+### A third, for keep on top
+
+The compact overlay took the binary to 352 KB. The same kind of map found the
+room: `DrawVectorIcon` was the largest function in the program at 16 KB,
+because every one of its hundred-odd strokes expanded in place into the point
+scaling and the GDI+ call. Sending each stroke through one small function
+instead, which does the same arithmetic in the same order, brought it back to
+345 KB. Every mode was captured again and compared, and the icons came out
+pixel-for-pixel the same.
 
 Three things that did *not* work, for the record: LTO ICEs in GCC 13's
 mingw-w64 (`binds_to_current_def_p`); `-fno-asynchronous-unwind-tables` makes
@@ -373,9 +385,9 @@ It also recognises an install made with the script below and takes it over.
 
 ### Size
 
-`CalculatorSetup.exe` is about 218KB -- smaller than the 347KB calculator it
+`CalculatorSetup.exe` is about 220KB -- smaller than the 345KB calculator it
 installs. Most of that is the calculator travelling compressed: LZMA after
-the x86 branch filter, the pair `xz` uses for executables, gets it to 130KB.
+the x86 branch filter, the pair `xz` uses for executables, gets it to 133KB.
 `tools/pack_payload.py` packs it at build time with Python's own `lzma`
 module, and Setup unpacks it with a decoder of its own (`installer/Unpack.cpp`,
 after the reference decoder in the public-domain LZMA SDK) that decodes
