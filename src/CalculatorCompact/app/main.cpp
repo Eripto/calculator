@@ -340,6 +340,21 @@ namespace
         return 1.0f - inverse * inverse * inverse;
     }
 
+    // The motion clock, in milliseconds, from the performance counter.
+    //
+    // This used to be GetTickCount64, which only moves every 15.6ms. A 60Hz
+    // frame is 16.7ms, so frame to frame an animation advanced 15.6ms most of
+    // the time and 31.2ms now and then, and sat still in between -- motion
+    // that looked like it caught on something several times a second.
+    double MotionNow()
+    {
+        LARGE_INTEGER now{};
+        LARGE_INTEGER frequency{};
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        return static_cast<double>(now.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+    }
+
     class Anim
     {
     public:
@@ -347,7 +362,7 @@ namespace
         // animation continues smoothly instead of jumping.
         void To(float target, int durationMs, float (*easing)(float) = EaseDecelerate)
         {
-            if (m_target == target && (m_startTick != 0 || m_value == target))
+            if (m_target == target && (m_running || m_value == target))
             {
                 return;
             }
@@ -356,7 +371,8 @@ namespace
             m_target = target;
             m_duration = (durationMs > 0) ? durationMs : 1;
             m_easing = easing;
-            m_startTick = GetTickCount64();
+            m_start = MotionNow();
+            m_running = true;
         }
 
         void Set(float value)
@@ -364,40 +380,41 @@ namespace
             m_value = value;
             m_from = value;
             m_target = value;
-            m_startTick = 0;
+            m_running = false;
         }
 
         float Value() const
         {
-            if (m_startTick == 0)
+            if (!m_running)
             {
                 return m_target;
             }
-            const ULONGLONG elapsed = GetTickCount64() - m_startTick;
-            if (elapsed >= static_cast<ULONGLONG>(m_duration))
+            const double elapsed = MotionNow() - m_start;
+            if (elapsed >= m_duration)
             {
                 return m_target;
             }
-            const float t = static_cast<float>(elapsed) / static_cast<float>(m_duration);
+            const float t = static_cast<float>(elapsed / m_duration);
             return m_from + (m_target - m_from) * m_easing(t);
         }
 
         bool Active() const
         {
-            return m_startTick != 0 && (GetTickCount64() - m_startTick) < static_cast<ULONGLONG>(m_duration);
+            return m_running && MotionNow() - m_start < m_duration;
         }
 
         void Settle()
         {
-            if (m_startTick != 0 && !Active())
+            if (m_running && !Active())
             {
                 m_value = m_target;
-                m_startTick = 0;
+                m_running = false;
             }
         }
 
     private:
-        ULONGLONG m_startTick = 0;
+        double m_start = 0.0;
+        bool m_running = false;
         int m_duration = 1;
         float m_from = 0.0f;
         float m_target = 0.0f;
@@ -1291,6 +1308,14 @@ namespace
         bool SettingsVisible() const
         {
             return m_settingsOpen || m_settingsAnim.Value() > 0.002f;
+        }
+
+        // The navigation pane or the settings page sliding, over content that
+        // is standing still.
+        bool OnlyOverlaySliding() const
+        {
+            return (m_navAnim.Active() || m_settingsAnim.Active()) && !m_contentAnim.Active() && !m_panelAnim.Active()
+                && !m_themeAnim.Active() && !m_bannerAnim.Active() && !m_toastAnim.Active();
         }
 
         bool AnimationsRunning() const
@@ -3990,8 +4015,18 @@ namespace
 
     // The navigation pane and settings page are surfaces above the content: an
     // opaque panel with a soft edge, sliding in from the left.
+    // Set while the content under a sliding pane is drawn once for the whole
+    // slide: hover and press fades are drawn where they will end up.
+    bool g_settledMotion = false;
+
     void ButtonMotion(const CalcApp& app, const Btn& b, int index, int hotIndex, int pressedIndex, float& hot, float& pressed)
     {
+        if (g_settledMotion)
+        {
+            hot = (index == hotIndex) ? 1.0f : 0.0f;
+            pressed = (index == pressedIndex) ? 1.0f : 0.0f;
+            return;
+        }
         if (index == hotIndex)
         {
             hot = app.m_hoverIn.Value();
@@ -4091,16 +4126,20 @@ namespace
     // Memory column measures -- and decommits the heap's free blocks, so what
     // goes is released outright where it can be, not just paged out.
     //
-    // It runs when the window is minimised, and once whenever the calculator
-    // goes quiet: kTrimAfterIdleMs after the last message or animation frame,
-    // and not again until something happens. Never on a repeating timer. An
-    // earlier version trimmed every two seconds and released the back buffer
-    // while it was at it; the next paint reallocated the buffer and faulted
-    // every page back in, and two seconds later it all happened again -- a
-    // figure that jumped up and down while nothing was happening. Nothing is
-    // released here and nothing repaints afterwards, so at rest the figure
-    // stays down, and the pages come back from RAM when the calculator is
-    // next used.
+    // It runs when the window is minimised, and whenever the calculator goes
+    // quiet: kTrimAfterIdleMs after it was last used, or as soon as it is
+    // idle once another window has been brought to the front -- which is
+    // what looking at Task Manager does. Anything that runs in the process
+    // afterwards, including a message some other program sends it, makes it
+    // due again, never more often than kTrimSpacingMs; see the message loop.
+    //
+    // Never on a repeating timer. An earlier version trimmed every two
+    // seconds and released the back buffer while it was at it; the next paint
+    // reallocated the buffer and faulted every page back in, and two seconds
+    // later it all happened again -- a figure that jumped up and down while
+    // nothing was happening. Nothing is released here and nothing repaints
+    // afterwards, so at rest the figure stays down, and the pages come back
+    // from RAM when the calculator is next used.
     //
     // A hard working-set limit would hold the figure down while it is in use
     // too, but only by making Windows take pages away mid-paint and hand them
@@ -4128,14 +4167,21 @@ namespace
         }
     }
 
-    // How long the calculator has to be quiet before TrimWorkingSet runs.
+    // How long the calculator has to be quiet before TrimWorkingSet runs, and
+    // how close together two trims may come.
     constexpr ULONGLONG kTrimAfterIdleMs = 1500;
+    constexpr ULONGLONG kTrimSpacingMs = 1000;
+    bool g_inactive = false; // another app is in front
 
-    // Never composite more often than this, whatever DwmFlush does.
-    constexpr ULONGLONG kMinFrameMs = 16; // 60fps; the compositor will not show more
-    ULONGLONG g_lastFrameTick = 0;
+    // One 60Hz frame. Frames are drawn on the compositor's clock, never more
+    // often than this; see the message loop.
+    constexpr double kFrameMs = 1000.0 / 60.0;
 
     Surface g_backBuffer;
+    // What is under the navigation pane or the settings page while it
+    // slides; see PaintApp.
+    Surface g_navBase;
+    bool g_navBaseValid = false;
     Surface g_scratch;
 
     // Holds the frame as it looked under the outgoing theme, for the length of
@@ -4145,6 +4191,14 @@ namespace
     // Set while g_scratch holds an outer composite, so a nested fade knows to
     // draw straight to its target instead of stealing the layer.
     bool g_scratchHeld = false;
+
+    // The layers that only exist for a transition.
+    void ReleaseTransitionLayers()
+    {
+        g_scratch.Release();
+        g_themeLayer.Release();
+        g_navBase.Release();
+    }
 
     // Switching theme repaints every surface in the window at once, which is
     // far too much to change in a single frame. Grabbing the frame as it is
@@ -4985,6 +5039,33 @@ namespace
 
         if (enter >= 0.999f || width <= 0 || height <= 0)
         {
+            // While the navigation pane or the settings page slides, nothing
+            // under it changes, so it is drawn once when the slide starts and
+            // copied in on every frame after: each frame is then one copy, the
+            // scrim and the pane, rather than the whole keypad and display
+            // again. Hover and press fades underneath are drawn settled; the
+            // one key that could be fading, the hamburger, is under the pane.
+            if (app.OnlyOverlaySliding() && width > 0 && height > 0)
+            {
+                if (!g_navBaseValid || !g_navBase.Matches(width, height))
+                {
+                    HDC base = g_navBase.Acquire(hdc, width, height);
+                    if (base != nullptr)
+                    {
+                        g_settledMotion = true;
+                        PaintContent(base, width, height);
+                        g_settledMotion = false;
+                        g_navBaseValid = true;
+                    }
+                }
+                if (g_navBaseValid)
+                {
+                    BitBlt(hdc, 0, 0, width, height, g_navBase.Dc(), 0, 0, SRCCOPY);
+                    PaintOverlays(hdc, width, height);
+                    return;
+                }
+            }
+            g_navBaseValid = false;
             PaintContent(hdc, width, height);
             PaintOverlays(hdc, width, height);
             return;
@@ -6556,11 +6637,18 @@ namespace
             {
                 // Nothing is on screen to hold a buffer for.
                 g_backBuffer.Release();
-                g_scratch.Release();
+                ReleaseTransitionLayers();
                 TrimWorkingSet();
             }
             app.Relayout();
             return 0;
+
+        case WM_ACTIVATEAPP:
+            // Once something else is in front the calculator is not being
+            // used, so the message loop trims as soon as it goes idle rather
+            // than waiting kTrimAfterIdleMs.
+            g_inactive = (wParam == FALSE);
+            break;
 
         case WM_NCCALCSIZE:
             if (app.m_alwaysOnTop && wParam)
@@ -7047,8 +7135,7 @@ namespace
                 SaveCompactPlacement(hwnd);
             }
             g_backBuffer.Release();
-            g_scratch.Release();
-            g_themeLayer.Release();
+            ReleaseTransitionLayers();
             PostQuitMessage(0);
             return 0;
 
@@ -7312,50 +7399,71 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     MSG message{};
     bool running = true;
     bool wasAnimating = false;
-    bool trimPending = true; // startup counts as activity
-    ULONGLONG lastActivity = GetTickCount64();
+
+    // Idle trimming. lastUse is when the calculator was last used: a message
+    // posted to it, or an animation frame. trimDue is set by anything at all
+    // that runs here after a trim -- including messages other programs send
+    // the window, which Task Manager, the taskbar and accessibility tools all
+    // do. Those are delivered inside the wait below and never come out of it
+    // as a message, so they are caught by the wait ending with nothing posted.
+    // (This loop used to go straight to GetMessage when its wait ended, and
+    // GetMessage runs a sent message and then goes on waiting for a posted
+    // one: with Task Manager open, pinging the window every second, the trim
+    // never came round at all.)
+    ULONGLONG lastUse = GetTickCount64();
+    ULONGLONG lastTrim = 0;
+    bool trimDue = true;
     while (running)
     {
         const bool animating = g_app.AnimationsRunning();
         if (animating)
         {
-            lastActivity = GetTickCount64();
-            trimPending = true;
+            lastUse = GetTickCount64();
+            trimDue = true;
         }
         if (wasAnimating && !animating)
         {
-            // The scratch layer only exists for transitions, so let it go as
-            // soon as one ends. The back buffer stays: the next paint needs it,
-            // and releasing it only guarantees an allocation to get it back.
-            g_scratch.Release();
-            g_themeLayer.Release();
+            // The scratch layers only exist for transitions, so let them go
+            // as soon as one ends. The back buffer stays: the next paint needs
+            // it, and releasing it only guarantees an allocation to get it back.
+            ReleaseTransitionLayers();
             g_app.OnAnimationsSettled();
         }
         wasAnimating = animating;
 
         if (!animating)
         {
-            // Idle: wait for the next message, but if a trim is due and the
-            // calculator stays quiet until then, do it first.
-            if (trimPending)
+            DWORD wait = INFINITE;
+            if (trimDue)
             {
-                const ULONGLONG idle = GetTickCount64() - lastActivity;
-                const DWORD wait = idle >= kTrimAfterIdleMs ? 0 : static_cast<DWORD>(kTrimAfterIdleMs - idle);
-                if (MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT)
+                const ULONGLONG now = GetTickCount64();
+                const ULONGLONG readyAt = (std::max)(lastUse + (g_inactive ? 0 : kTrimAfterIdleMs), lastTrim + kTrimSpacingMs);
+                if (now >= readyAt)
                 {
                     TrimWorkingSet();
-                    trimPending = false;
+                    lastTrim = GetTickCount64();
+                    trimDue = false;
                     continue;
                 }
+                wait = static_cast<DWORD>(readyAt - now);
             }
-            if (GetMessageW(&message, nullptr, 0, 0) <= 0)
+            if (MsgWaitForMultipleObjectsEx(0, nullptr, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT)
             {
-                break;
+                continue;
             }
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-            lastActivity = GetTickCount64();
-            trimPending = true;
+            // Something ran or is waiting: PeekMessage delivers any sent
+            // messages itself, then hands back a posted one if there is one.
+            trimDue = true;
+            if (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+            {
+                if (message.message == WM_QUIT)
+                {
+                    break;
+                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+                lastUse = GetTickCount64();
+            }
             continue;
         }
 
@@ -7374,33 +7482,46 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
             break;
         }
 
-        // A frame-rate floor, independent of DwmFlush.
+        // A frame, then wait for the compositor. DwmFlush returns at the next
+        // composition pass, so a frame drawn straight after it has the whole
+        // refresh interval to be ready for the one after. At 60Hz that is one
+        // frame per pass; on a faster display the loop waits out passes until
+        // most of a 60Hz interval has gone, which keeps it at 60 or a little
+        // over rather than drawing at 144.
         //
-        // DwmFlush is meant to block until the next composition pass, but it
-        // returns immediately when the window is occluded, when composition is
-        // off, and on some drivers under load. Without a floor the loop then
-        // repaints as fast as the machine allows -- a full-window composite per
-        // iteration, which pegs a core and churns the allocator hard enough to
-        // look like a leak.
-        const ULONGLONG now = GetTickCount64();
-        const ULONGLONG sinceLastFrame = now - g_lastFrameTick;
-        if (sinceLastFrame < kMinFrameMs)
-        {
-            Sleep(static_cast<DWORD>(kMinFrameMs - sinceLastFrame));
-        }
-        g_lastFrameTick = GetTickCount64();
-
+        // This used to wait out the interval with Sleep, measured with
+        // GetTickCount64. Both work in 15.6ms steps, so a frame that was
+        // judged a millisecond early slept a whole step, missed its pass and
+        // showed a pass late: the animation ran at an uneven 30 to 60 fps.
+        //
+        // Where DwmFlush does not wait -- the window is covered, or the
+        // compositor is off -- Sleep stands in for it; nothing is on screen
+        // for its coarseness to show on.
+        const double frameStart = MotionNow();
         g_app.FrameTick();
-        if (FAILED(DwmFlush()))
+        for (;;)
         {
-            Sleep(8); // composition is off; fall back to a fixed cadence
+            const double before = MotionNow();
+            const bool paced = SUCCEEDED(DwmFlush()) && MotionNow() - before >= 0.5;
+            const double since = MotionNow() - frameStart;
+            if (!paced)
+            {
+                if (since < kFrameMs - 3.0)
+                {
+                    Sleep(static_cast<DWORD>(kFrameMs - since));
+                }
+                break;
+            }
+            if (since >= kFrameMs - 3.0)
+            {
+                break;
+            }
         }
     }
 
     ClearFontCache();
     g_backBuffer.Release();
-    g_scratch.Release();
-    g_themeLayer.Release();
+    ReleaseTransitionLayers();
     if (gdiplusHooked && startupOutput.NotificationUnhook != nullptr)
     {
         startupOutput.NotificationUnhook(gdiplusHook);

@@ -63,15 +63,31 @@ entering.
 Frames are paced against the compositor with `DwmFlush` from the message loop,
 not by `WM_TIMER`. A timer's 15.6ms granularity, low priority and coalescing are
 what make timer-driven motion look like it stutters; the loop goes back to
-blocking on `GetMessage` as soon as everything settles, so an idle window costs
+waiting for messages as soon as everything settles, so an idle window costs
 nothing.
 
-`DwmFlush` is not enough on its own. It is meant to block until the next
-composition pass, but it returns immediately when the window is occluded, when
-composition is off, and on some drivers under load, and the loop then repaints
-as fast as the machine allows. A 16ms floor sits in front of it, which is all
-the compositor can show anyway; without it, switching modes quickly pegged a
-core.
+A frame is drawn straight after `DwmFlush` returns, so it has the whole refresh
+interval to be ready for the next pass. At 60Hz that is a frame every pass; on
+a faster display the loop lets passes go by until most of a 60Hz interval has
+passed, so it stays at 60fps or a little over rather than drawing at 144. Where
+`DwmFlush` does not wait -- the window is covered, or composition is off -- a
+`Sleep` stands in for it, since without one the loop would repaint as fast as
+the machine allows.
+
+That last part used to be a floor measured with `GetTickCount64` and waited
+out with `Sleep`, and it was what made the navigation pane look rough. Both
+work in 15.6ms steps: a frame judged a millisecond early slept a whole step,
+missed its pass and appeared a pass late, so a 250ms slide ran at anything
+from 30 to 60fps. The animations' own clock was `GetTickCount64` too, so even
+the frames that did arrive on time showed the slide moving 15.6ms and then
+31.2ms and then 15.6ms again. Both now use the performance counter.
+
+The slide itself is cheap to draw. While the navigation pane or the settings
+page moves, nothing under it changes, so the content is drawn once when the
+slide starts and copied in on every frame after; each frame is then a copy,
+the scrim and the pane. Timed under Wine, a frame of the pane opening went
+from 4.2-4.6ms to 2.6ms, and frames went from arriving 3 to 17ms apart to a
+steady 16.4ms.
 
 Two further implementation notes. Animated values are computed from the clock on demand
 rather than stepped, so a dropped frame never leaves an animation stranded
@@ -295,13 +311,27 @@ What Task Manager shows is the *active private working set*: the private pages
 the process has touched recently and still holds, not what it has allocated.
 Pages stay in it after they stop being needed -- a page visited once while
 drawing Settings stays counted there until Windows reclaims it. So once
-the app has had 1.5 seconds with no input and nothing moving, the message loop
-hands its working set back once (`SetProcessWorkingSetSize(-1, -1)`, and the
-heap's free blocks decommitted). Nothing is freed or rebuilt, so the next paint
+the app has had 1.5 seconds with no input and nothing moving -- or straight
+away, once another window has been brought to the front -- the message loop
+hands its working set back (`SetProcessWorkingSetSize(-1, -1)`, and the heap's
+free blocks decommitted). Nothing is freed or rebuilt, so the next paint
 doesn't fault everything back in and repaint again, which is what went wrong
-with the timer above; the trim is re-armed only by real input and fires at most
-once per idle spell. Sitting on any screen, the number then falls back to what
-is actually in use. While you click and type it rises and settles again.
+with the timer above. Sitting on any screen, the number then falls back to
+what is actually in use. While you click and type it rises and settles again.
+
+The first version of this never ran while Task Manager was open, which is the
+one time anyone looks. Programs send other programs' windows messages all the
+time -- Task Manager, the taskbar and accessibility tools among them -- and a
+sent message ends the loop's idle wait just as a posted one does. The loop then
+called `GetMessage`, which runs a sent message itself and goes on waiting for a
+posted one; with the window being pinged every second or so, it waited there
+indefinitely, and the trim never came round. Reproduced under Wine with a
+second process sending `WM_NULL` every 400ms: after a click, the old loop did
+not trim once in nine seconds. The loop now waits, and then uses `PeekMessage`,
+which delivers sent messages and returns. Anything that runs in the process
+after a trim, a sent message included, makes another one due, at most once a
+second -- the same test now trims 1.5 seconds after the click and then once a
+second while the pings touch the process, and stops when they stop.
 
 It's a trim at rest rather than a hard cap
 (`QUOTA_LIMITS_HARDWS_MAX_ENABLE`) because a 1MB ceiling is smaller than a
